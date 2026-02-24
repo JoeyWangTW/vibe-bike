@@ -14,6 +14,9 @@
 - Dirty-region display updates: track prev values, only redraw on change — prevents flicker, saves SPI bandwidth
 - Font 7 = 7-segment (huge, for main number), Font 6 = medium digits, Font 4 = medium text, Font 2 = small labels
 - `bike_dashboard` is the main production sketch — it combines pulse counter + display + all future features
+- Session state machine: READY → ACTIVE → PAUSED → ENDED — use enum + switch/case for clarity
+- Active time accumulation: `accumulatedActiveMs + (now - activeStartTime)` — handles pause/resume intervals
+- RPM timeout (3s) is independent from session pause (30s) and end (2min) timeouts
 
 ---
 
@@ -96,4 +99,28 @@
   - Font 7 is the big 7-segment font — perfect for the main RPM number, readable at distance
   - `firstDraw` flag ensures all values render on first frame even when prev == current
   - Keep layout constants as #defines at the top for easy adjustment
+---
+
+## 2026-02-24 - VB-008: Auto-detect session start and stop
+- Added session state machine to `bike_dashboard.ino` with enum SessionState
+  - READY → ACTIVE (first pulse) → PAUSED (30s timeout) → ENDED (2min timeout)
+  - PAUSED → ACTIVE on resume (pulse detected during pause)
+  - ENDED is terminal — stays ended
+- Active time tracking redesigned:
+  - `accumulatedActiveMs`: sum of completed active intervals
+  - `activeStartTime`: when current active interval started
+  - `getActiveTimeMs()`: returns accumulated + current interval
+  - On ACTIVE → PAUSED transition: freeze time using `lastPulseTimeLoop - activeStartTime`
+  - On PAUSED → ACTIVE resume: start new interval with `activeStartTime = now`
+- RPM timeout (3s) and session pause timeout (30s) are independent — RPM zeroes faster than session pauses
+- Color-coded status: green PEDALING, yellow PAUSED, red ENDED, grey READY
+- `lastPulseTimeLoop` copies ISR's lastPulseTime for safe use in state machine calculations
+- Compiles cleanly: 335KB flash (25%), 23KB RAM (7%)
+- Files changed: firmware/bike_dashboard/bike_dashboard.ino (modified), prd.json, docs/status.md, docs/worklog.md
+- **Learnings for future iterations:**
+  - Use enum for state machines — cleaner than booleans, switch/case makes transitions explicit
+  - Active time needs interval accumulation, not simple `now - startTime` — can't handle pauses with a single timestamp
+  - Keep RPM timeout separate from session timeouts — different thresholds for different purposes
+  - State machine function should be separate from loop() for clarity and testability
+  - `lastPulseTime` from ISR is used both for RPM timeout and session state — copy once per loop iteration
 ---

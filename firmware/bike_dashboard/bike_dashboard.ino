@@ -1,6 +1,5 @@
-// bike_dashboard.ino — VB-007: Dashboard UI v1 for Vibe Bike
-// Combines pulse counter (VB-004/005) with TFT display (VB-006).
-// Shows RPM, speed, distance, and elapsed time on the 2.8" ILI9341V screen.
+// bike_dashboard.ino — Vibe Bike Dashboard (VB-004 through VB-008)
+// Pulse counter + speed/distance + TFT display + session auto-detect.
 //
 // Board: ESP32-32E with ILI9341V (240x320)
 // Wiring:
@@ -27,6 +26,10 @@
 #define USE_METRIC          true
 #define KM_TO_MILES         0.621371
 
+// ── Session Configuration ────────────────────────────────────
+#define PAUSE_TIMEOUT_MS    30000   // 30s no pulses → paused
+#define END_TIMEOUT_MS      120000  // 2 min no pulses → ended
+
 // ── Display Configuration ────────────────────────────────────
 #define TFT_BL_PIN        21
 #define DISPLAY_UPDATE_MS 500   // 2Hz display refresh
@@ -35,24 +38,17 @@
 #define BG_COLOR          TFT_BLACK
 #define TITLE_COLOR       0x04B3     // Dark teal
 #define LABEL_COLOR       0x7BEF     // Grey
-#define VALUE_COLOR       TFT_WHITE
 #define RPM_COLOR         TFT_CYAN
 #define SPEED_COLOR       TFT_GREEN
 #define DIST_COLOR        TFT_YELLOW
 #define TIME_COLOR        0xFD20     // Orange
 #define DIVIDER_COLOR     0x2104     // Dark grey
 #define STATUS_ACTIVE     TFT_GREEN
-#define STATUS_STOPPED    0x7BEF     // Grey
+#define STATUS_PAUSED     TFT_YELLOW
+#define STATUS_ENDED      TFT_RED
+#define STATUS_READY      0x7BEF     // Grey
 
 // ── Layout (240x320 portrait) ────────────────────────────────
-// Title bar:     y=0-24
-// RPM zone:      y=25-144   (large, centered)
-// Divider:       y=145
-// Speed/Dist:    y=150-234  (two columns)
-// Divider:       y=235
-// Time:          y=240-294
-// Status bar:    y=295-319
-
 #define TITLE_Y       4
 #define RPM_VALUE_Y   45
 #define RPM_LABEL_Y   125
@@ -67,12 +63,18 @@
 #define TIME_LABEL_Y  242
 #define TIME_VALUE_Y  260
 #define STATUS_Y      302
-
-// Column centers for speed/distance
 #define LEFT_COL      60
 #define RIGHT_COL     180
 
 TFT_eSPI tft = TFT_eSPI();
+
+// ── Session States ───────────────────────────────────────────
+enum SessionState {
+    SESSION_READY,    // Waiting for first pulse
+    SESSION_ACTIVE,   // Pedaling — timer running
+    SESSION_PAUSED,   // No pulses for 30s — timer frozen
+    SESSION_ENDED     // No pulses for 2 min — session over
+};
 
 // ── ISR Variables ────────────────────────────────────────────
 volatile unsigned long lastPulseTime = 0;
@@ -124,16 +126,20 @@ float totalDistanceM = 0;
 unsigned long lastDistancePulse = 0;
 unsigned long displayPulseCount = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long sessionStartTime = 0;
-unsigned long elapsedActiveMs = 0;
-bool sessionActive = false;
+
+// Session state
+SessionState sessionState = SESSION_READY;
+unsigned long activeStartTime = 0;     // When current active interval started
+unsigned long accumulatedActiveMs = 0;  // Total active time from previous intervals
+unsigned long lastPulseTimeLoop = 0;    // Copy of lastPulseTime for loop use
 
 // Previous display values (for dirty-region updates)
 int prevRpmInt = -1;
 int prevSpeedTenths = -1;
 int prevDistHundredths = -1;
 int prevTimeSec = -1;
-bool prevSessionActive = false;
+SessionState prevDisplayState = SESSION_READY;
+unsigned long prevDisplayPulses = 0;
 bool firstDraw = true;
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -149,6 +155,14 @@ float getDisplayDistance() {
 
 const char* speedUnit() { return USE_METRIC ? "km/h" : "mph"; }
 const char* distUnit()  { return USE_METRIC ? "km"   : "mi"; }
+
+// Get total active time (accumulated + current active interval)
+unsigned long getActiveTimeMs(unsigned long now) {
+    if (sessionState == SESSION_ACTIVE) {
+        return accumulatedActiveMs + (now - activeStartTime);
+    }
+    return accumulatedActiveMs;
+}
 
 // ── Display Drawing ──────────────────────────────────────────
 
@@ -167,18 +181,11 @@ void drawStaticUI() {
     // Divider 1
     tft.drawFastHLine(10, DIV1_Y, 220, DIVIDER_COLOR);
 
-    // Speed label
+    // Speed / Distance labels and units
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("SPEED", LEFT_COL, SPEED_LABEL_Y, 2);
-
-    // Distance label
     tft.drawString("DISTANCE", RIGHT_COL, DIST_LABEL_Y, 2);
-
-    // Speed unit
-    tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString(speedUnit(), LEFT_COL, SPEED_UNIT_Y, 2);
-
-    // Distance unit
     tft.drawString(distUnit(), RIGHT_COL, DIST_UNIT_Y, 2);
 
     // Divider 2
@@ -202,7 +209,7 @@ void updateRpmDisplay(float rpm) {
 
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(RPM_COLOR, BG_COLOR);
-    tft.drawString(buf, 120, RPM_VALUE_Y, 7);  // Font 7 = 7-segment, large
+    tft.drawString(buf, 120, RPM_VALUE_Y, 7);
 }
 
 void updateSpeedDisplay(float speed) {
@@ -250,36 +257,90 @@ void updateTimeDisplay(unsigned long activeMs) {
 
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TIME_COLOR, BG_COLOR);
-    tft.drawString(buf, 120, TIME_VALUE_Y, 6);  // Font 6 = medium digits
+    tft.drawString(buf, 120, TIME_VALUE_Y, 6);
 }
 
-void updateStatusBar(bool active, unsigned long pulses) {
-    // Only redraw if state changed
-    if (active != prevSessionActive || firstDraw) {
-        prevSessionActive = active;
+void updateStatusBar(SessionState state, unsigned long pulses) {
+    // Redraw state label on change
+    if (state != prevDisplayState || firstDraw) {
+        prevDisplayState = state;
 
-        // Clear status area
-        tft.fillRect(0, STATUS_Y - 4, 240, 24, BG_COLOR);
+        // Clear left side of status area
+        tft.fillRect(0, STATUS_Y - 4, 130, 24, BG_COLOR);
 
         tft.setTextDatum(TL_DATUM);
-        if (active) {
-            tft.setTextColor(STATUS_ACTIVE, BG_COLOR);
-            tft.drawString("PEDALING", 14, STATUS_Y, 2);
-        } else if (pulses > 0) {
-            tft.setTextColor(STATUS_STOPPED, BG_COLOR);
-            tft.drawString("STOPPED", 14, STATUS_Y, 2);
-        } else {
-            tft.setTextColor(STATUS_STOPPED, BG_COLOR);
-            tft.drawString("READY", 14, STATUS_Y, 2);
+        switch (state) {
+            case SESSION_READY:
+                tft.setTextColor(STATUS_READY, BG_COLOR);
+                tft.drawString("READY", 14, STATUS_Y, 2);
+                break;
+            case SESSION_ACTIVE:
+                tft.setTextColor(STATUS_ACTIVE, BG_COLOR);
+                tft.drawString("PEDALING", 14, STATUS_Y, 2);
+                break;
+            case SESSION_PAUSED:
+                tft.setTextColor(STATUS_PAUSED, BG_COLOR);
+                tft.drawString("PAUSED", 14, STATUS_Y, 2);
+                break;
+            case SESSION_ENDED:
+                tft.setTextColor(STATUS_ENDED, BG_COLOR);
+                tft.drawString("ENDED", 14, STATUS_Y, 2);
+                break;
         }
     }
 
-    // Pulse count (right-aligned, always update)
-    char buf[16];
-    sprintf(buf, "%lu rev", pulses);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(LABEL_COLOR, BG_COLOR);
-    tft.drawString(buf, 226, STATUS_Y, 2);
+    // Pulse count (right side, update on change)
+    if (pulses != prevDisplayPulses || firstDraw) {
+        prevDisplayPulses = pulses;
+
+        // Clear right side
+        tft.fillRect(130, STATUS_Y - 4, 110, 24, BG_COLOR);
+
+        char buf[16];
+        sprintf(buf, "%lu rev", pulses);
+        tft.setTextDatum(TR_DATUM);
+        tft.setTextColor(LABEL_COLOR, BG_COLOR);
+        tft.drawString(buf, 226, STATUS_Y, 2);
+    }
+}
+
+// ── Session State Machine ────────────────────────────────────
+void updateSessionState(unsigned long now, unsigned long timeSinceLastPulse, bool gotPulse) {
+    switch (sessionState) {
+        case SESSION_READY:
+            if (gotPulse) {
+                sessionState = SESSION_ACTIVE;
+                activeStartTime = now;
+                accumulatedActiveMs = 0;
+                Serial.println("Session: READY -> ACTIVE");
+            }
+            break;
+
+        case SESSION_ACTIVE:
+            if (timeSinceLastPulse > PAUSE_TIMEOUT_MS) {
+                // Freeze active time at the moment of last pulse
+                accumulatedActiveMs += (lastPulseTimeLoop - activeStartTime);
+                sessionState = SESSION_PAUSED;
+                Serial.println("Session: ACTIVE -> PAUSED");
+            }
+            break;
+
+        case SESSION_PAUSED:
+            if (gotPulse) {
+                // Resume — start a new active interval
+                activeStartTime = now;
+                sessionState = SESSION_ACTIVE;
+                Serial.println("Session: PAUSED -> ACTIVE (resumed)");
+            } else if (timeSinceLastPulse > END_TIMEOUT_MS) {
+                sessionState = SESSION_ENDED;
+                Serial.println("Session: PAUSED -> ENDED");
+            }
+            break;
+
+        case SESSION_ENDED:
+            // Terminal state — stays ended
+            break;
+    }
 }
 
 // ── Setup ────────────────────────────────────────────────────
@@ -293,7 +354,7 @@ void setup() {
 
     // Display
     tft.init();
-    tft.setRotation(0);  // Portrait 240x320
+    tft.setRotation(0);
     drawStaticUI();
 
     // Sensor
@@ -301,24 +362,26 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(SENSOR_PIN), onPulse, FALLING);
     clearRpmBuffer();
 
-    // Initial display values
+    // Initial display
     updateRpmDisplay(0);
     updateSpeedDisplay(0);
     updateDistDisplay(0);
     updateTimeDisplay(0);
-    updateStatusBar(false, 0);
+    updateStatusBar(SESSION_READY, 0);
     firstDraw = false;
 
-    Serial.println("Vibe Bike Dashboard v1.0 — Ready");
+    Serial.println("Vibe Bike Dashboard v1.1 — Ready");
 }
 
 // ── Main Loop ────────────────────────────────────────────────
 void loop() {
     unsigned long now = millis();
+    bool gotPulse = false;
 
     // Process new pulse from ISR
     if (newPulse) {
         newPulse = false;
+        gotPulse = true;
 
         noInterrupts();
         unsigned long interval = pulseInterval;
@@ -326,12 +389,6 @@ void loop() {
         interrupts();
 
         displayPulseCount = count;
-
-        // Start session timer on first pulse
-        if (!sessionActive) {
-            sessionActive = true;
-            sessionStartTime = now;
-        }
 
         // Calculate instantaneous RPM
         if (interval > 0) {
@@ -358,24 +415,24 @@ void loop() {
         }
     }
 
-    // Timeout detection
+    // Read last pulse time for state machine
     noInterrupts();
     unsigned long timeSinceLastPulse = now - lastPulseTime;
+    lastPulseTimeLoop = lastPulseTime;
     interrupts();
 
-    if (lastPulseTime > 0 && timeSinceLastPulse > RPM_TIMEOUT_MS) {
+    // RPM timeout (separate from session — RPM zeroes faster than session pauses)
+    if (lastPulseTimeLoop > 0 && timeSinceLastPulse > RPM_TIMEOUT_MS) {
         currentRpm = 0;
         clearRpmBuffer();
     }
 
+    // Session state machine
+    updateSessionState(now, timeSinceLastPulse, gotPulse);
+
     // Calculate values
     smoothedRpm = (currentRpm > 0) ? getSmoothedRpm() : 0;
     currentSpeed = rpmToSpeed(smoothedRpm);
-
-    // Track active time (only when pedaling)
-    if (sessionActive && smoothedRpm > 0) {
-        elapsedActiveMs = now - sessionStartTime;
-    }
 
     // Update display at fixed interval
     if (now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
@@ -384,7 +441,7 @@ void loop() {
         updateRpmDisplay(smoothedRpm);
         updateSpeedDisplay(currentSpeed);
         updateDistDisplay(getDisplayDistance());
-        updateTimeDisplay(elapsedActiveMs);
-        updateStatusBar(smoothedRpm > 0, displayPulseCount);
+        updateTimeDisplay(getActiveTimeMs(now));
+        updateStatusBar(sessionState, displayPulseCount);
     }
 }

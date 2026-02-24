@@ -130,7 +130,9 @@
       ],
       "phase": 1,
       "priority": "medium",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "Session state machine: READY → ACTIVE (first pulse) → PAUSED (30s no pulses) → ENDED (2 min no pulses). PAUSED → ACTIVE on resume. Active time accumulated across intervals (excludes paused time). Color-coded status: green PEDALING, yellow PAUSED, red ENDED, grey READY. 335KB flash (25%), 23KB RAM (7%)."
     },
     {
       "id": "VB-009",

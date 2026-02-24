@@ -57,3 +57,17 @@
 - 2Hz display refresh rate matching serial output
 - Color scheme: dark background, high-contrast colored values per metric
 - Compiles: 334KB flash (25%), 23KB RAM (7%)
+
+## 2026-02-24 - VB-008: Auto-detect session start and stop
+
+- Added session state machine to `firmware/bike_dashboard/bike_dashboard.ino`
+  - States: READY → ACTIVE → PAUSED → ENDED
+  - READY → ACTIVE: first pulse detected
+  - ACTIVE → PAUSED: 30s no pulses (PAUSE_TIMEOUT_MS)
+  - PAUSED → ACTIVE: pulse detected (resume)
+  - PAUSED → ENDED: 2 min no pulses (END_TIMEOUT_MS)
+- Active time tracking: accumulates intervals, excludes paused time
+  - `accumulatedActiveMs` stores completed intervals, `activeStartTime` tracks current
+- Color-coded status indicator: green PEDALING, yellow PAUSED, red ENDED, grey READY
+- RPM timeout (3s) is separate from session pause (30s) — RPM zeroes faster
+- Compiles: 335KB flash (25%), 23KB RAM (7%)

@@ -15,6 +15,7 @@
 - **VB-005:** Speed & distance — configurable road-equivalent conversion, pulse-based distance accumulation, metric/imperial units
 - **VB-006:** Display setup — TFT_eSPI configured for ESP32-32E ILI9341V, Hello World sketch compiles
 - **VB-007:** Dashboard UI v1 — full ride dashboard with RPM, speed, distance, time, status bar
+- **VB-008:** Session auto-detect — state machine (READY/ACTIVE/PAUSED/ENDED), active-only timer
 
 ## In Progress
 
@@ -22,7 +23,6 @@
 
 ## Up Next
 
-- **VB-008:** Auto-detect session start/stop
 - **VB-009:** Log session data to SD card
 
 ## Blockers
