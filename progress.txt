@@ -11,6 +11,9 @@
 - ESP32-32E display pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21, RST=EN (shared)
 - Use ILI9341_2_DRIVER + HSPI port for this board (not ILI9341_DRIVER, not FSPI/VSPI)
 - Backlight on IO21: HIGH = on — must set manually with digitalWrite in setup()
+- Dirty-region display updates: track prev values, only redraw on change — prevents flicker, saves SPI bandwidth
+- Font 7 = 7-segment (huge, for main number), Font 6 = medium digits, Font 4 = medium text, Font 2 = small labels
+- `bike_dashboard` is the main production sketch — it combines pulse counter + display + all future features
 
 ---
 
@@ -72,4 +75,25 @@
   - The ESP32-32E and CYD ESP32-2432S028R share the same SPI pin mapping for the display
   - TFT_eSPI `tft.drawString()` with datum (TC_DATUM, TL_DATUM) handles alignment cleanly
   - Always verify existing sketches still compile after changing User_Setup.h
+---
+
+## 2026-02-24 - VB-007: Display dashboard UI v1
+- Created `firmware/bike_dashboard/bike_dashboard.ino` — full dashboard combining pulse counter + display
+- Portrait layout (240x320): title → RPM (huge) → speed|distance (two-column) → time → status bar
+- Dirty-region display updates: tracks previous values, only redraws on change (avoids flicker)
+  - prevRpmInt, prevSpeedTenths, prevDistHundredths, prevTimeSec for change detection
+- Color scheme: cyan RPM, green speed, yellow distance, orange time, grey labels
+- Font choices: Font 7 (7-segment, huge) for RPM, Font 4 for speed/distance, Font 6 for time
+- Status bar: PEDALING (green) / STOPPED (grey) / READY (grey) + revolution count
+- Elapsed time tracks active pedaling only (not paused time)
+- 2Hz display refresh (DISPLAY_UPDATE_MS = 500)
+- All pulse counter logic preserved from VB-004/005 (ISR, debounce, smoothing, speed, distance)
+- Compiles cleanly: 334KB flash (25%), 23KB RAM (7%)
+- Files changed: firmware/bike_dashboard/bike_dashboard.ino (new), prd.json, docs/status.md, docs/worklog.md
+- **Learnings for future iterations:**
+  - Use `tft.setTextColor(fg, bg)` with background color to auto-clear old text on redraw
+  - Track previous display values as ints (e.g., rpm*1, speed*10, dist*100) for efficient change detection
+  - Font 7 is the big 7-segment font — perfect for the main RPM number, readable at distance
+  - `firstDraw` flag ensures all values render on first frame even when prev == current
+  - Keep layout constants as #defines at the top for easy adjustment
 ---

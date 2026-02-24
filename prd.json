@@ -113,7 +113,9 @@
       ],
       "phase": 1,
       "priority": "high",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "Dashboard at firmware/bike_dashboard/bike_dashboard.ino. Portrait 240x320 layout: RPM (huge font 7), speed+distance (two columns, font 4), elapsed time (font 6), status bar. Dirty-region updates at 2Hz — only redraws changed values. Color-coded: cyan RPM, green speed, yellow distance, orange time. 334KB flash (25%), 23KB RAM (7%)."
     },
     {
       "id": "VB-008",

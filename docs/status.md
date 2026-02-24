@@ -14,6 +14,7 @@
 - **VB-004:** Pulse counter firmware — interrupt-driven RPM with debounce, smoothing, edge cases
 - **VB-005:** Speed & distance — configurable road-equivalent conversion, pulse-based distance accumulation, metric/imperial units
 - **VB-006:** Display setup — TFT_eSPI configured for ESP32-32E ILI9341V, Hello World sketch compiles
+- **VB-007:** Dashboard UI v1 — full ride dashboard with RPM, speed, distance, time, status bar
 
 ## In Progress
 
@@ -21,8 +22,8 @@
 
 ## Up Next
 
-- **VB-007:** Build dashboard UI v1
 - **VB-008:** Auto-detect session start/stop
+- **VB-009:** Log session data to SD card
 
 ## Blockers
 

@@ -43,3 +43,17 @@
   - Turns on backlight via IO21, portrait orientation (240x320)
 - Compiles cleanly: 330KB flash (25%), 22KB RAM (6%)
 - Existing pulse_counter sketch still compiles with updated User_Setup.h
+
+## 2026-02-24 - VB-007: Dashboard UI v1
+
+- Created `firmware/bike_dashboard/bike_dashboard.ino` — combines pulse counter + TFT display
+- Layout (240x320 portrait):
+  - Title bar: "VIBE BIKE" in dark teal
+  - RPM: huge 7-segment font, cyan, centered
+  - Speed + Distance: two-column layout, green + yellow, font 4
+  - Elapsed time: orange, font 6, mm:ss format
+  - Status bar: PEDALING/STOPPED/READY + revolution count
+- Dirty-region updates: only redraws values that changed (prev value tracking)
+- 2Hz display refresh rate matching serial output
+- Color scheme: dark background, high-contrast colored values per metric
+- Compiles: 334KB flash (25%), 23KB RAM (7%)
