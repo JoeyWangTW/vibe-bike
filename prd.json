@@ -80,7 +80,9 @@
       ],
       "phase": 1,
       "priority": "high",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "Speed from RPM via configurable DISTANCE_PER_REV_M (default 6.3m, ~3:1 flywheel ratio × 2.1m circumference). Distance accumulated per pulse. Configurable metric/imperial via USE_METRIC. Serial output shows RPM, speed, distance, and pulse count at 2Hz."
     },
     {
       "id": "VB-006",

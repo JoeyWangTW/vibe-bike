@@ -1,5 +1,5 @@
-// Vibe Bike — Pulse Counter Firmware (VB-004)
-// Interrupt-driven cadence measurement from bike reed switch.
+// Vibe Bike — Pulse Counter + Speed/Distance Firmware (VB-004, VB-005)
+// Interrupt-driven cadence, speed, and distance from bike reed switch.
 //
 // Wiring:
 //   3.3V ─── 10K resistor ─── IO35 ─── bike wire 1
@@ -20,6 +20,16 @@
 #define MAX_RPM           200.0   // Above this, likely bounce artifact
 #define SMOOTHING_SAMPLES 4       // Rolling average window for RPM
 #define SERIAL_UPDATE_MS  500     // How often to print RPM to serial
+
+// ── Speed & Distance Configuration ─────────────────────────────
+// Indoor bike: 1 reed switch pulse = 1 pedal revolution.
+// DISTANCE_PER_REV estimates the road-equivalent distance per pedal revolution.
+// Typical indoor bike with ~3:1 flywheel ratio and 700c equivalent:
+//   1 pedal rev × 3 wheel revs × 2.1m circumference ≈ 6.3m
+// Adjust this value to calibrate your specific bike.
+#define DISTANCE_PER_REV_M  6.3   // Meters of road-equivalent distance per revolution
+#define USE_METRIC          true  // true = km/h + km, false = mph + miles
+#define KM_TO_MILES         0.621371
 
 // ── ISR Variables (volatile, accessed from interrupt) ──────────
 volatile unsigned long lastPulseTime = 0;
@@ -74,6 +84,28 @@ float smoothedRpm = 0;
 unsigned long lastSerialUpdate = 0;
 unsigned long displayPulseCount = 0;
 
+// ── Speed & Distance State ───────────────────────────────────
+float currentSpeed = 0;          // Current speed in display units (km/h or mph)
+float totalDistanceM = 0;        // Accumulated distance in meters
+unsigned long lastDistancePulse = 0;  // Last pulse count used for distance calc
+
+// ── Speed & Distance Helpers ─────────────────────────────────
+// Convert RPM to speed in display units
+float rpmToSpeed(float rpm) {
+    // speed = RPM × distance_per_rev × 60 min/hr ÷ 1000 m/km
+    float speedKmh = rpm * DISTANCE_PER_REV_M * 60.0 / 1000.0;
+    return USE_METRIC ? speedKmh : speedKmh * KM_TO_MILES;
+}
+
+// Get total distance in display units
+float getDisplayDistance() {
+    float distKm = totalDistanceM / 1000.0;
+    return USE_METRIC ? distKm : distKm * KM_TO_MILES;
+}
+
+const char* speedUnit() { return USE_METRIC ? "km/h" : "mph"; }
+const char* distUnit()  { return USE_METRIC ? "km"   : "mi"; }
+
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -85,14 +117,15 @@ void setup() {
     clearRpmBuffer();
 
     Serial.println();
-    Serial.println("╔══════════════════════════════════╗");
-    Serial.println("║   Vibe Bike — Pulse Counter      ║");
-    Serial.println("║   Firmware v1.0 (VB-004)         ║");
-    Serial.println("╠══════════════════════════════════╣");
-    Serial.println("║ Sensor: IO35 (FALLING interrupt) ║");
-    Serial.println("║ Debounce: 50ms                   ║");
-    Serial.println("║ Timeout: 3s → RPM=0              ║");
-    Serial.println("╚══════════════════════════════════╝");
+    Serial.println("╔══════════════════════════════════════╗");
+    Serial.println("║   Vibe Bike — Pulse + Speed/Distance ║");
+    Serial.println("║   Firmware v1.1 (VB-004 + VB-005)   ║");
+    Serial.println("╠══════════════════════════════════════╣");
+    Serial.printf( "║ Sensor: IO35 (FALLING interrupt)     ║\n");
+    Serial.printf( "║ Distance/rev: %.1f m                  ║\n", DISTANCE_PER_REV_M);
+    Serial.printf( "║ Units: %s, %s                    ║\n", speedUnit(), distUnit());
+    Serial.println("║ Debounce: 50ms | Timeout: 3s         ║");
+    Serial.println("╚══════════════════════════════════════╝");
     Serial.println();
     Serial.println("Waiting for pedaling...");
     Serial.println();
@@ -131,6 +164,13 @@ void loop() {
         if (currentRpm > 0) {
             addRpmSample(currentRpm);
         }
+
+        // Accumulate distance: count new pulses since last distance update
+        unsigned long newPulses = count - lastDistancePulse;
+        if (newPulses > 0 && currentRpm >= MIN_RPM) {
+            totalDistanceM += newPulses * DISTANCE_PER_REV_M;
+            lastDistancePulse = count;
+        }
     }
 
     // Timeout detection: no pulse for RPM_TIMEOUT_MS → stopped
@@ -143,21 +183,23 @@ void loop() {
         clearRpmBuffer();
     }
 
-    // Calculate smoothed RPM
+    // Calculate smoothed RPM and speed
     smoothedRpm = (currentRpm > 0) ? getSmoothedRpm() : 0;
+    currentSpeed = rpmToSpeed(smoothedRpm);
 
     // Serial output at fixed interval
     if (now - lastSerialUpdate >= SERIAL_UPDATE_MS) {
         lastSerialUpdate = now;
 
+        float dist = getDisplayDistance();
+
         if (smoothedRpm > 0) {
-            Serial.printf("RPM: %5.1f (raw: %5.1f) | Pulses: %lu | Interval: %lu ms\n",
-                          smoothedRpm, currentRpm, displayPulseCount,
-                          (unsigned long)(currentRpm > 0 ? 60000.0 / currentRpm : 0));
+            Serial.printf("RPM: %5.1f | Speed: %5.1f %s | Dist: %6.2f %s | Pulses: %lu\n",
+                          smoothedRpm, currentSpeed, speedUnit(),
+                          dist, distUnit(), displayPulseCount);
         } else if (displayPulseCount > 0) {
-            Serial.printf("RPM:   0.0 (stopped)    | Pulses: %lu | Last active: %lu ms ago\n",
-                          displayPulseCount, timeSinceLastPulse);
+            Serial.printf("RPM:   0.0 (stopped) | Speed:   0.0 %s | Dist: %6.2f %s | Pulses: %lu\n",
+                          speedUnit(), dist, distUnit(), displayPulseCount);
         }
-        // Don't spam "waiting" — only print once at startup
     }
 }

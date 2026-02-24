@@ -4,6 +4,9 @@
 - ESP32 IO35 is input-only — no internal pull-up available, must use external 10K to 3.3V
 - Compile check: `arduino-cli compile -b esp32:esp32:esp32 firmware/<name>` — fast, no board needed
 - FQBN is `esp32:esp32:esp32` (not esp32dev or other variants)
+- Speed/distance are derived values — extend existing sketch rather than creating a new one
+- Use `#define` for bike-specific calibration constants (DISTANCE_PER_REV_M) so they're easy to tune
+- Distance accumulation uses pulse count delta, not RPM × time — more accurate, no drift from timing
 
 ---
 
@@ -26,4 +29,24 @@
   - IO35 is input-only on ESP32, so `pinMode(pin, INPUT)` is correct (no INPUT_PULLUP available)
   - Rolling average smoothing prevents jittery RPM display without adding latency
   - Keep ISR minimal — only set flags and timestamps, do math in loop()
+---
+
+## 2026-02-24 - VB-005: Calculate speed and distance
+- Extended `firmware/pulse_counter/pulse_counter.ino` with speed and distance calculations
+- Speed: RPM × DISTANCE_PER_REV_M × 60 / 1000 → km/h (or mph if USE_METRIC=false)
+- Distance: accumulated per pulse using pulse count delta × DISTANCE_PER_REV_M (meters)
+- Configurable constants:
+  - `DISTANCE_PER_REV_M` = 6.3m (default: 3:1 flywheel ratio × 2.1m wheel circumference)
+  - `USE_METRIC` = true/false for km/h+km vs mph+miles
+  - `KM_TO_MILES` = 0.621371
+- Distance uses pulse-count-based accumulation (not RPM × time) for accuracy
+- Only counts distance when RPM ≥ MIN_RPM (noise rejection)
+- Serial output updated: RPM, speed with units, distance with units, pulse count
+- Compiles cleanly: 287KB flash (21%), 22KB RAM (6%)
+- Files changed: firmware/pulse_counter/pulse_counter.ino (modified), prd.json (updated)
+- **Learnings for future iterations:**
+  - Accumulate distance from pulse count delta rather than RPM × elapsed time — avoids floating-point drift
+  - Indoor bike distance conversion is a guess — 6.3m/rev is reasonable for ~3:1 gear ratio
+  - Keep unit conversion in helper functions (rpmToSpeed, getDisplayDistance) so the main loop stays clean
+  - `const char*` return type works fine for unit labels in Arduino/ESP32 — no need for String
 ---
