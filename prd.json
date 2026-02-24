@@ -147,7 +147,9 @@
       ],
       "phase": 1,
       "priority": "medium",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "SD card on VSPI (CS=IO5). Raw data logged every 1s (elapsed, rpm, speed, distance, pulses). Summary written on session end with duration, distance, avg/max RPM, avg/max speed, total revolutions. Files: session_NNNN.csv (raw + summary), summary_NNNN.csv (parseable). Auto-increments session number. Graceful degradation if SD missing. Note: filenames use sequential numbering (not YYYY-MM-DD) since no RTC/WiFi yet — real timestamps come in Phase 3. 381KB flash (29%), 23KB RAM (7%)."
     }
   ]
 }

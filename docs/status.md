@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-02-24
 
-**Current state:** Phase 1 — Display configured and Hello World verified, ready for dashboard UI
+**Current state:** Phase 1 COMPLETE — All 9 stories done. Dashboard with cadence, speed, distance, session management, and SD logging.
 
 ## Recently Completed
 
@@ -16,14 +16,15 @@
 - **VB-006:** Display setup — TFT_eSPI configured for ESP32-32E ILI9341V, Hello World sketch compiles
 - **VB-007:** Dashboard UI v1 — full ride dashboard with RPM, speed, distance, time, status bar
 - **VB-008:** Session auto-detect — state machine (READY/ACTIVE/PAUSED/ENDED), active-only timer
+- **VB-009:** SD card logging — raw data every 1s + session summary CSV, graceful if SD missing
 
 ## In Progress
 
-- (ready for next story)
+- (Phase 1 complete!)
 
 ## Up Next
 
-- **VB-009:** Log session data to SD card
+- **Phase 2:** BLE heart rate monitor integration
 
 ## Blockers
 

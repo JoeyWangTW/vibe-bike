@@ -71,3 +71,23 @@
 - Color-coded status indicator: green PEDALING, yellow PAUSED, red ENDED, grey READY
 - RPM timeout (3s) is separate from session pause (30s) — RPM zeroes faster
 - Compiles: 335KB flash (25%), 23KB RAM (7%)
+
+## 2026-02-24 - VB-009: Log session data to SD card
+
+- Added SD card support to `firmware/bike_dashboard/bike_dashboard.ino`
+  - SD card on VSPI bus (CS=IO5, MOSI=IO23, SCLK=IO18, MISO=IO19), separate from display HSPI
+  - Graceful degradation: dashboard works without SD card, shows "SD" or "--" indicator
+- Session files: `session_NNNN.csv` with auto-incrementing session numbers
+  - Raw data: elapsed_sec, rpm, speed, distance, pulses — logged every 1s during session
+  - Summary appended at end: duration, distance, avg/max RPM, avg/max speed, total revolutions
+- Separate summary file: `summary_NNNN.csv` for easy parsing (field, unit, value format)
+- Stats tracking: maxRpm, maxSpeed, sumRpm, rpmSampleCount for averages
+- Status bar shows "SAVED" (red) when session ends and data is written
+- Compiles: 381KB flash (29%), 23KB RAM (7%)
+- Note: Uses sequential session numbers (not YYYY-MM-DD) — no RTC/WiFi yet
+
+## 2026-02-24 - Phase 1 Complete!
+
+- All 9 user stories (VB-001 through VB-009) are now passing
+- Main production sketch: `firmware/bike_dashboard/bike_dashboard.ino`
+- Capabilities: pulse counting, RPM smoothing, speed/distance, TFT dashboard, session management, SD logging

@@ -1,10 +1,13 @@
-// bike_dashboard.ino — Vibe Bike Dashboard (VB-004 through VB-008)
-// Pulse counter + speed/distance + TFT display + session auto-detect.
+// bike_dashboard.ino — Vibe Bike Dashboard (VB-004 through VB-009)
+// Pulse counter + speed/distance + TFT display + session auto-detect + SD logging.
 //
 // Board: ESP32-32E with ILI9341V (240x320)
 // Wiring:
 //   3.3V ─── 10K resistor ─── IO35 ─── bike wire 1
 //   GND  ────────────────────────────── bike wire 2
+//
+// SD Card: VSPI bus (IO5=CS, IO23=MOSI, IO18=SCLK, IO19=MISO)
+// Display: HSPI bus (IO15=CS, IO13=MOSI, IO14=SCLK, IO12=MISO)
 //
 // Build:
 //   arduino-cli compile -b esp32:esp32:esp32 firmware/bike_dashboard
@@ -12,6 +15,8 @@
 //   arduino-cli monitor -p /dev/cu.usbmodem2101 -c baudrate=115200
 
 #include <TFT_eSPI.h>
+#include <SD.h>
+#include <SPI.h>
 
 // ── Sensor Configuration ─────────────────────────────────────
 #define SENSOR_PIN        35
@@ -27,26 +32,30 @@
 #define KM_TO_MILES         0.621371
 
 // ── Session Configuration ────────────────────────────────────
-#define PAUSE_TIMEOUT_MS    30000   // 30s no pulses → paused
-#define END_TIMEOUT_MS      120000  // 2 min no pulses → ended
+#define PAUSE_TIMEOUT_MS    30000
+#define END_TIMEOUT_MS      120000
 
 // ── Display Configuration ────────────────────────────────────
 #define TFT_BL_PIN        21
-#define DISPLAY_UPDATE_MS 500   // 2Hz display refresh
+#define DISPLAY_UPDATE_MS 500
+
+// ── SD Card Configuration ────────────────────────────────────
+#define SD_CS_PIN         5
+#define RAW_LOG_INTERVAL_MS  1000  // Log raw data every 1s during session
 
 // ── Colors ───────────────────────────────────────────────────
 #define BG_COLOR          TFT_BLACK
-#define TITLE_COLOR       0x04B3     // Dark teal
-#define LABEL_COLOR       0x7BEF     // Grey
+#define TITLE_COLOR       0x04B3
+#define LABEL_COLOR       0x7BEF
 #define RPM_COLOR         TFT_CYAN
 #define SPEED_COLOR       TFT_GREEN
 #define DIST_COLOR        TFT_YELLOW
-#define TIME_COLOR        0xFD20     // Orange
-#define DIVIDER_COLOR     0x2104     // Dark grey
+#define TIME_COLOR        0xFD20
+#define DIVIDER_COLOR     0x2104
 #define STATUS_ACTIVE     TFT_GREEN
 #define STATUS_PAUSED     TFT_YELLOW
 #define STATUS_ENDED      TFT_RED
-#define STATUS_READY      0x7BEF     // Grey
+#define STATUS_READY      0x7BEF
 
 // ── Layout (240x320 portrait) ────────────────────────────────
 #define TITLE_Y       4
@@ -70,10 +79,10 @@ TFT_eSPI tft = TFT_eSPI();
 
 // ── Session States ───────────────────────────────────────────
 enum SessionState {
-    SESSION_READY,    // Waiting for first pulse
-    SESSION_ACTIVE,   // Pedaling — timer running
-    SESSION_PAUSED,   // No pulses for 30s — timer frozen
-    SESSION_ENDED     // No pulses for 2 min — session over
+    SESSION_READY,
+    SESSION_ACTIVE,
+    SESSION_PAUSED,
+    SESSION_ENDED
 };
 
 // ── ISR Variables ────────────────────────────────────────────
@@ -129,9 +138,22 @@ unsigned long lastDisplayUpdate = 0;
 
 // Session state
 SessionState sessionState = SESSION_READY;
-unsigned long activeStartTime = 0;     // When current active interval started
-unsigned long accumulatedActiveMs = 0;  // Total active time from previous intervals
-unsigned long lastPulseTimeLoop = 0;    // Copy of lastPulseTime for loop use
+unsigned long activeStartTime = 0;
+unsigned long accumulatedActiveMs = 0;
+unsigned long lastPulseTimeLoop = 0;
+
+// Session stats (for summary)
+float maxRpm = 0;
+float maxSpeed = 0;
+double sumRpm = 0;        // Sum of all RPM samples (for average)
+unsigned long rpmSampleCount = 0;  // Number of RPM samples taken
+
+// SD card state
+bool sdReady = false;
+int sessionNumber = 0;
+char sessionFilename[24];  // "/session_NNNN.csv"
+unsigned long lastRawLogTime = 0;
+bool sessionLogged = false;  // Prevent double-logging
 
 // Previous display values (for dirty-region updates)
 int prevRpmInt = -1;
@@ -156,7 +178,6 @@ float getDisplayDistance() {
 const char* speedUnit() { return USE_METRIC ? "km/h" : "mph"; }
 const char* distUnit()  { return USE_METRIC ? "km"   : "mi"; }
 
-// Get total active time (accumulated + current active interval)
 unsigned long getActiveTimeMs(unsigned long now) {
     if (sessionState == SESSION_ACTIVE) {
         return accumulatedActiveMs + (now - activeStartTime);
@@ -164,39 +185,161 @@ unsigned long getActiveTimeMs(unsigned long now) {
     return accumulatedActiveMs;
 }
 
+// ── SD Card Functions ────────────────────────────────────────
+
+// Find next available session number by checking existing files
+int findNextSessionNumber() {
+    int maxNum = 0;
+    File root = SD.open("/");
+    if (!root) return 1;
+
+    File entry;
+    while ((entry = root.openNextFile())) {
+        const char* name = entry.name();
+        // Match "session_NNNN.csv" pattern
+        if (strncmp(name, "session_", 8) == 0) {
+            int num = atoi(name + 8);
+            if (num > maxNum) maxNum = num;
+        }
+        entry.close();
+    }
+    root.close();
+    return maxNum + 1;
+}
+
+bool initSD() {
+    if (!SD.begin(SD_CS_PIN)) {
+        Serial.println("SD: Card not found or failed to mount");
+        return false;
+    }
+
+    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    Serial.printf("SD: Card mounted, %llu MB\n", cardSize);
+
+    sessionNumber = findNextSessionNumber();
+    Serial.printf("SD: Next session number: %d\n", sessionNumber);
+    return true;
+}
+
+void startSessionLog() {
+    if (!sdReady) return;
+
+    sprintf(sessionFilename, "/session_%04d.csv", sessionNumber);
+
+    File f = SD.open(sessionFilename, FILE_WRITE);
+    if (!f) {
+        Serial.printf("SD: Failed to create %s\n", sessionFilename);
+        sdReady = false;
+        return;
+    }
+
+    // Raw data header
+    f.println("elapsed_sec,rpm,speed,distance,pulses");
+    f.close();
+
+    Serial.printf("SD: Logging to %s\n", sessionFilename);
+}
+
+void logRawData(unsigned long activeMs) {
+    if (!sdReady) return;
+
+    File f = SD.open(sessionFilename, FILE_APPEND);
+    if (!f) {
+        Serial.println("SD: Failed to append raw data");
+        return;
+    }
+
+    float dist = getDisplayDistance();
+    f.printf("%.1f,%.1f,%.1f,%.2f,%lu\n",
+             activeMs / 1000.0, smoothedRpm, currentSpeed, dist, displayPulseCount);
+    f.close();
+}
+
+void writeSessionSummary() {
+    if (!sdReady || sessionLogged) return;
+    sessionLogged = true;
+
+    // Calculate averages
+    float avgRpm = (rpmSampleCount > 0) ? (sumRpm / rpmSampleCount) : 0;
+    float avgSpeed = rpmToSpeed(avgRpm);
+    float dist = getDisplayDistance();
+    unsigned long durationSec = accumulatedActiveMs / 1000;
+
+    // Append summary to the session file
+    File f = SD.open(sessionFilename, FILE_APPEND);
+    if (!f) {
+        Serial.println("SD: Failed to write summary");
+        return;
+    }
+
+    f.println();
+    f.println("# SESSION SUMMARY");
+    f.printf("# duration_sec,%lu\n", durationSec);
+    f.printf("# distance,%s,%.2f\n", distUnit(), dist);
+    f.printf("# avg_rpm,%.1f\n", avgRpm);
+    f.printf("# max_rpm,%.1f\n", maxRpm);
+    f.printf("# avg_speed,%s,%.1f\n", speedUnit(), avgSpeed);
+    f.printf("# max_speed,%s,%.1f\n", speedUnit(), maxSpeed);
+    f.printf("# total_revolutions,%lu\n", displayPulseCount);
+    f.close();
+
+    // Also write a summary-only file for easy parsing
+    char summaryFile[28];
+    sprintf(summaryFile, "/summary_%04d.csv", sessionNumber);
+    File sf = SD.open(summaryFile, FILE_WRITE);
+    if (sf) {
+        sf.println("field,unit,value");
+        sf.printf("duration,sec,%lu\n", durationSec);
+        sf.printf("distance,%s,%.2f\n", distUnit(), dist);
+        sf.printf("avg_rpm,rpm,%.1f\n", avgRpm);
+        sf.printf("max_rpm,rpm,%.1f\n", maxRpm);
+        sf.printf("avg_speed,%s,%.1f\n", speedUnit(), avgSpeed);
+        sf.printf("max_speed,%s,%.1f\n", speedUnit(), maxSpeed);
+        sf.printf("revolutions,count,%lu\n", displayPulseCount);
+        sf.close();
+        Serial.printf("SD: Summary written to %s\n", summaryFile);
+    }
+
+    Serial.printf("SD: Session %d saved. Duration: %lus, Dist: %.2f %s, Avg RPM: %.1f\n",
+                  sessionNumber, durationSec, dist, distUnit(), avgRpm);
+}
+
 // ── Display Drawing ──────────────────────────────────────────
 
 void drawStaticUI() {
     tft.fillScreen(BG_COLOR);
 
-    // Title bar
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TITLE_COLOR, BG_COLOR);
     tft.drawString("VIBE BIKE", 120, TITLE_Y, 2);
 
-    // RPM label
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("RPM", 120, RPM_LABEL_Y, 4);
 
-    // Divider 1
     tft.drawFastHLine(10, DIV1_Y, 220, DIVIDER_COLOR);
 
-    // Speed / Distance labels and units
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("SPEED", LEFT_COL, SPEED_LABEL_Y, 2);
     tft.drawString("DISTANCE", RIGHT_COL, DIST_LABEL_Y, 2);
     tft.drawString(speedUnit(), LEFT_COL, SPEED_UNIT_Y, 2);
     tft.drawString(distUnit(), RIGHT_COL, DIST_UNIT_Y, 2);
 
-    // Divider 2
     tft.drawFastHLine(10, DIV2_Y, 220, DIVIDER_COLOR);
 
-    // Time label
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("TIME", 120, TIME_LABEL_Y, 2);
 
-    // Vertical divider between speed and distance
     tft.drawFastVLine(120, DIV1_Y + 2, DIV2_Y - DIV1_Y - 4, DIVIDER_COLOR);
+
+    // SD card indicator (top right)
+    tft.setTextDatum(TR_DATUM);
+    if (sdReady) {
+        tft.setTextColor(TFT_GREEN, BG_COLOR);
+        tft.drawString("SD", 234, TITLE_Y, 2);
+    } else {
+        tft.setTextColor(TFT_RED, BG_COLOR);
+        tft.drawString("--", 234, TITLE_Y, 2);
+    }
 }
 
 void updateRpmDisplay(float rpm) {
@@ -261,11 +404,9 @@ void updateTimeDisplay(unsigned long activeMs) {
 }
 
 void updateStatusBar(SessionState state, unsigned long pulses) {
-    // Redraw state label on change
     if (state != prevDisplayState || firstDraw) {
         prevDisplayState = state;
 
-        // Clear left side of status area
         tft.fillRect(0, STATUS_Y - 4, 130, 24, BG_COLOR);
 
         tft.setTextDatum(TL_DATUM);
@@ -284,16 +425,14 @@ void updateStatusBar(SessionState state, unsigned long pulses) {
                 break;
             case SESSION_ENDED:
                 tft.setTextColor(STATUS_ENDED, BG_COLOR);
-                tft.drawString("ENDED", 14, STATUS_Y, 2);
+                tft.drawString("SAVED", 14, STATUS_Y, 2);
                 break;
         }
     }
 
-    // Pulse count (right side, update on change)
     if (pulses != prevDisplayPulses || firstDraw) {
         prevDisplayPulses = pulses;
 
-        // Clear right side
         tft.fillRect(130, STATUS_Y - 4, 110, 24, BG_COLOR);
 
         char buf[16];
@@ -312,13 +451,18 @@ void updateSessionState(unsigned long now, unsigned long timeSinceLastPulse, boo
                 sessionState = SESSION_ACTIVE;
                 activeStartTime = now;
                 accumulatedActiveMs = 0;
+                maxRpm = 0;
+                maxSpeed = 0;
+                sumRpm = 0;
+                rpmSampleCount = 0;
+                sessionLogged = false;
+                startSessionLog();
                 Serial.println("Session: READY -> ACTIVE");
             }
             break;
 
         case SESSION_ACTIVE:
             if (timeSinceLastPulse > PAUSE_TIMEOUT_MS) {
-                // Freeze active time at the moment of last pulse
                 accumulatedActiveMs += (lastPulseTimeLoop - activeStartTime);
                 sessionState = SESSION_PAUSED;
                 Serial.println("Session: ACTIVE -> PAUSED");
@@ -327,18 +471,17 @@ void updateSessionState(unsigned long now, unsigned long timeSinceLastPulse, boo
 
         case SESSION_PAUSED:
             if (gotPulse) {
-                // Resume — start a new active interval
                 activeStartTime = now;
                 sessionState = SESSION_ACTIVE;
                 Serial.println("Session: PAUSED -> ACTIVE (resumed)");
             } else if (timeSinceLastPulse > END_TIMEOUT_MS) {
                 sessionState = SESSION_ENDED;
+                writeSessionSummary();
                 Serial.println("Session: PAUSED -> ENDED");
             }
             break;
 
         case SESSION_ENDED:
-            // Terminal state — stays ended
             break;
     }
 }
@@ -355,6 +498,10 @@ void setup() {
     // Display
     tft.init();
     tft.setRotation(0);
+
+    // SD card (uses VSPI, separate from display HSPI)
+    sdReady = initSD();
+
     drawStaticUI();
 
     // Sensor
@@ -370,7 +517,8 @@ void setup() {
     updateStatusBar(SESSION_READY, 0);
     firstDraw = false;
 
-    Serial.println("Vibe Bike Dashboard v1.1 — Ready");
+    Serial.println("Vibe Bike Dashboard v1.2 — Ready");
+    if (!sdReady) Serial.println("WARNING: SD card not available. Session data will not be saved.");
 }
 
 // ── Main Loop ────────────────────────────────────────────────
@@ -399,7 +547,7 @@ void loop() {
         if (currentRpm < MIN_RPM) {
             currentRpm = 0;
         } else if (currentRpm > MAX_RPM) {
-            return;  // Bounce — ignore
+            return;
         }
 
         // Smoothing
@@ -421,7 +569,7 @@ void loop() {
     lastPulseTimeLoop = lastPulseTime;
     interrupts();
 
-    // RPM timeout (separate from session — RPM zeroes faster than session pauses)
+    // RPM timeout
     if (lastPulseTimeLoop > 0 && timeSinceLastPulse > RPM_TIMEOUT_MS) {
         currentRpm = 0;
         clearRpmBuffer();
@@ -433,6 +581,22 @@ void loop() {
     // Calculate values
     smoothedRpm = (currentRpm > 0) ? getSmoothedRpm() : 0;
     currentSpeed = rpmToSpeed(smoothedRpm);
+
+    // Track session stats (only when actively pedaling)
+    if (sessionState == SESSION_ACTIVE && smoothedRpm > 0) {
+        sumRpm += smoothedRpm;
+        rpmSampleCount++;
+        if (smoothedRpm > maxRpm) maxRpm = smoothedRpm;
+        if (currentSpeed > maxSpeed) maxSpeed = currentSpeed;
+    }
+
+    // Raw data logging to SD (every RAW_LOG_INTERVAL_MS during active/paused session)
+    if (sdReady && (sessionState == SESSION_ACTIVE || sessionState == SESSION_PAUSED)) {
+        if (now - lastRawLogTime >= RAW_LOG_INTERVAL_MS) {
+            lastRawLogTime = now;
+            logRawData(getActiveTimeMs(now));
+        }
+    }
 
     // Update display at fixed interval
     if (now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {

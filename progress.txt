@@ -17,6 +17,9 @@
 - Session state machine: READY → ACTIVE → PAUSED → ENDED — use enum + switch/case for clarity
 - Active time accumulation: `accumulatedActiveMs + (now - activeStartTime)` — handles pause/resume intervals
 - RPM timeout (3s) is independent from session pause (30s) and end (2min) timeouts
+- SD card uses VSPI (CS=IO5), display uses HSPI — no bus conflict, both work simultaneously
+- Open/close SD file per write — safer than keeping open (power-loss resilient)
+- Use `double` for accumulators (sumRpm) to avoid float precision loss over many samples
 
 ---
 
@@ -123,4 +126,41 @@
   - Keep RPM timeout separate from session timeouts — different thresholds for different purposes
   - State machine function should be separate from loop() for clarity and testability
   - `lastPulseTime` from ISR is used both for RPM timeout and session state — copy once per loop iteration
+---
+
+## 2026-02-24 - VB-009: Log session data to SD card
+- Added SD card logging to `bike_dashboard.ino`
+- SD card initialization:
+  - Uses VSPI bus (CS=IO5) — separate from display HSPI, no bus conflict
+  - `SD.begin(5)` handles VSPI setup automatically
+  - `findNextSessionNumber()` scans existing files to auto-increment
+- File structure:
+  - `session_NNNN.csv`: raw data header + rows every 1s + summary footer
+  - `summary_NNNN.csv`: parseable field/unit/value format for easy scripting
+- Raw data logging: elapsed_sec, rpm, speed, distance, pulses — every RAW_LOG_INTERVAL_MS (1s)
+  - Logs during both ACTIVE and PAUSED states (captures the pause gap)
+  - Opens/closes file each write (SD-safe, no data loss on power cut)
+- Session summary: written once on SESSION_ENDED transition
+  - `sessionLogged` flag prevents double-logging
+  - Fields: duration, distance, avg_rpm, max_rpm, avg_speed, max_speed, total_revolutions
+- Stats tracking added: maxRpm, maxSpeed, sumRpm (double for precision), rpmSampleCount
+  - Reset on session start, accumulated only during ACTIVE with smoothedRpm > 0
+- Graceful degradation: `sdReady` flag — dashboard fully functional without SD card
+  - "SD" (green) or "--" (red) indicator in top-right corner of display
+  - Warning printed to serial if SD not available
+- Status bar shows "SAVED" instead of "ENDED" when session data is written
+- Compiles cleanly: 381KB flash (29%), 23KB RAM (7%)
+- Files changed: firmware/bike_dashboard/bike_dashboard.ino (modified), prd.json, docs/status.md, docs/worklog.md
+- **Learnings for future iterations:**
+  - SD card uses VSPI, display uses HSPI — they coexist without conflict on ESP32
+  - Open/close file for each write is safer than keeping file open (power loss won't corrupt)
+  - `findNextSessionNumber()` iterates SD root — simple but works for reasonable session counts
+  - Sequential numbering (`session_NNNN`) is the pragmatic choice without RTC — real timestamps need WiFi/NTP
+  - Use `double` for sumRpm accumulator to avoid float precision loss over many samples
+  - `sessionLogged` flag is essential — state machine can re-enter ENDED check on every loop iteration
+---
+
+## Phase 1 COMPLETE
+All 9 user stories (VB-001 through VB-009) are now passing.
+Main production sketch: `firmware/bike_dashboard/bike_dashboard.ino`
 ---
