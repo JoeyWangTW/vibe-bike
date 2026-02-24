@@ -64,7 +64,9 @@
       ],
       "phase": 1,
       "priority": "critical",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "Interrupt-driven pulse counter on IO35 with 50ms debounce, 3s timeout for stopped detection, RPM clamping (10-200), and 4-sample rolling average smoothing. Serial output at 2Hz. Sketch: firmware/pulse_counter/pulse_counter.ino"
     },
     {
       "id": "VB-005",

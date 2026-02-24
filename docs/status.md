@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-02-24
 
-**Current state:** Phase 1 — Hardware done, ready for firmware development
+**Current state:** Phase 1 — Pulse counter firmware done, ready for display + speed/distance
 
 ## Recently Completed
 
@@ -11,18 +11,18 @@
 - **VB-001:** Probed 2-pin connector — confirmed reed switch, 1 pulse/rev, no polarity
 - **VB-002:** GPIO confirmed — using IO35 (input-only) with 10K pull-up to 3.3V
 - **VB-003:** Wiring plan finalized — reed switch → IO35 + GND, hardware assumed working
+- **VB-004:** Pulse counter firmware — interrupt-driven RPM with debounce, smoothing, edge cases
 
 ## In Progress
 
-- (ready to start firmware)
+- (ready for next story)
 
 ## Up Next
 
-- **VB-006:** Set up PlatformIO project and get "Hello World" on the display
-- **VB-004:** Implement interrupt-driven pulse counter
+- **VB-006:** Set up Arduino CLI project and get "Hello World" on the display
 - **VB-005:** Calculate speed and distance from RPM
 - **VB-007:** Build dashboard UI v1
 
 ## Blockers
 
-- (none — hardware investigation complete, firmware can proceed)
+- (none)

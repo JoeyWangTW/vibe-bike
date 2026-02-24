@@ -1,3 +1,29 @@
 ## Codebase Patterns
+- Arduino sketches go in `firmware/<name>/<name>.ino` — Arduino CLI requires directory name to match sketch name
+- Use `noInterrupts()`/`interrupts()` when reading ISR-shared volatile variables from loop()
+- ESP32 IO35 is input-only — no internal pull-up available, must use external 10K to 3.3V
+- Compile check: `arduino-cli compile -b esp32:esp32:esp32 firmware/<name>` — fast, no board needed
+- FQBN is `esp32:esp32:esp32` (not esp32dev or other variants)
 
+---
+
+## 2026-02-24 - VB-004: Implement pulse counter firmware
+- Created `firmware/pulse_counter/pulse_counter.ino` — production pulse counter
+- Hardware interrupt on IO35 (FALLING edge) for reed switch detection
+- 50ms debounce in ISR to reject reed switch bounce
+- RPM calculated from pulse interval: `60000.0 / interval_ms`
+- Edge case handling:
+  - Stopped: 3-second timeout with no pulses → RPM = 0, smoothing buffer cleared
+  - Very slow: RPM below 10 treated as stopped (noise rejection)
+  - Very fast: RPM above 200 rejected as bounce artifact (not added to buffer)
+- 4-sample rolling average for RPM smoothing
+- Serial output at 500ms intervals (2Hz) — shows smoothed RPM, raw RPM, pulse count, interval
+- Atomic reads of ISR variables using noInterrupts()/interrupts()
+- Compiles cleanly: 286KB flash (21%), 22KB RAM (6%)
+- Files changed: firmware/pulse_counter/pulse_counter.ino (new)
+- **Learnings for future iterations:**
+  - The test_reed_switch sketch already had basic interrupt + debounce — build on it, don't rewrite from scratch
+  - IO35 is input-only on ESP32, so `pinMode(pin, INPUT)` is correct (no INPUT_PULLUP available)
+  - Rolling average smoothing prevents jittery RPM display without adding latency
+  - Keep ISR minimal — only set flags and timestamps, do math in loop()
 ---
