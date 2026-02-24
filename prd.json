@@ -1,0 +1,143 @@
+{
+  "project": "Vibe Bike",
+  "branchName": "phase-1-bike-data",
+  "description": "Phase 1 MVP: Read cadence/speed data from the indoor bike's reed switch (2-pin connector, 1 pulse/rev) via IO35 and display it on the ESP32 2.8\" ILI9341 screen. Wiring: reed switch → IO35 (10K pull-up to 3.3V) + GND. The ESP32-32E display board is both the microcontroller and the screen.",
+  "userStories": [
+    {
+      "id": "VB-001",
+      "title": "Probe and identify bike signal",
+      "story": "As a builder, I want to probe the 2-pin connector with a multimeter so I can determine the signal type (reed switch, hall effect, or other) and voltage levels.",
+      "acceptance": [
+        "Document the signal type (digital pulse, analog, etc.)",
+        "Measure voltage range when pedaling vs idle",
+        "Determine if a pull-up or pull-down resistor is needed",
+        "Identify the pulse-per-revolution count (likely 1)"
+      ],
+      "phase": 1,
+      "priority": "critical",
+      "type": "research",
+      "passes": true,
+      "notes": "Reed switch confirmed. 1 pulse per revolution. No polarity — either wire to either pin."
+    },
+    {
+      "id": "VB-002",
+      "title": "Identify available ESP32 GPIO pin",
+      "story": "As a builder, I want to identify which GPIO pin on the ESP32-32E display board I can use for the bike sensor input, given that most pins are used by the display, touch, SD card, and other onboard peripherals.",
+      "acceptance": [
+        "Map out all GPIO usage on the specific board",
+        "Confirm IO35 (input-only) or IO27 are available",
+        "Test the chosen pin with a simple digitalRead sketch",
+        "Document wiring plan"
+      ],
+      "phase": 1,
+      "priority": "critical",
+      "type": "research",
+      "passes": true,
+      "notes": "IO35 (input-only) selected. 10K pull-up to 3.3V. Test script at firmware/test/test_reed_switch.cpp."
+    },
+    {
+      "id": "VB-003",
+      "title": "Wire bike sensor to ESP32",
+      "story": "As a builder, I want to physically connect the bike's 2-pin connector to the ESP32 GPIO so the microcontroller can read pedal pulses.",
+      "acceptance": [
+        "Solder or connect wires from 2-pin connector to ESP32 GPIO + GND",
+        "Add pull-up resistor if needed (10K typical for reed switch)",
+        "Verify clean signal with serial output (no excessive bounce)",
+        "Add basic debounce in software if needed"
+      ],
+      "phase": 1,
+      "priority": "critical",
+      "type": "hardware",
+      "passes": true,
+      "notes": "Wiring: reed switch wire 1 → IO35, wire 2 → GND, 10K pull-up from IO35 to 3.3V. Hardware assumed working."
+    },
+    {
+      "id": "VB-004",
+      "title": "Implement pulse counter firmware",
+      "story": "As a rider, I want the ESP32 to count pulses from the bike sensor so it can calculate my pedaling cadence in real-time.",
+      "acceptance": [
+        "Use hardware interrupt on the sensor GPIO pin",
+        "Count pulses and calculate RPM from pulse intervals",
+        "Handle edge cases: very slow pedaling, stopped, very fast pedaling",
+        "Debounce logic to avoid false counts from reed switch bounce",
+        "Serial output shows accurate RPM matching actual pedal speed"
+      ],
+      "phase": 1,
+      "priority": "critical",
+      "type": "firmware"
+    },
+    {
+      "id": "VB-005",
+      "title": "Calculate speed and distance",
+      "story": "As a rider, I want to see my estimated speed and total distance so I can track my workout progress.",
+      "acceptance": [
+        "Convert RPM to speed using configurable wheel circumference",
+        "Accumulate distance over the session",
+        "Display in sensible units (km/h or mph, km or miles — configurable)",
+        "Handle the indoor-bike-to-road-equivalent conversion reasonably"
+      ],
+      "phase": 1,
+      "priority": "high",
+      "type": "firmware"
+    },
+    {
+      "id": "VB-006",
+      "title": "Set up Arduino CLI project and display Hello World",
+      "story": "As a developer, I want a working arduino-cli build setup so firmware compiles and uploads to the ESP32-32E display board.",
+      "acceptance": [
+        "Arduino sketch in firmware/<name>/<name>.ino compiles with arduino-cli",
+        "TFT_eSPI configured for ILI9341 with correct SPI pin mapping for this board",
+        "Compiles and uploads to the ESP32-32E display board via /dev/cu.usbmodem2101",
+        "Basic 'Hello World' renders on the 2.8\" screen"
+      ],
+      "phase": 1,
+      "priority": "high",
+      "type": "firmware"
+    },
+    {
+      "id": "VB-007",
+      "title": "Display dashboard UI v1",
+      "story": "As a rider, I want to see a clean dashboard on the 2.8\" screen showing my current RPM, speed, distance, and elapsed time so I can monitor my ride at a glance while pedaling.",
+      "acceptance": [
+        "240x320 layout with large, readable numbers",
+        "Shows: RPM (cadence), speed, distance, elapsed time",
+        "Updates in real-time (at least 2x per second for RPM)",
+        "Readable from typical bike riding position (~arm's length)",
+        "Dark background with high-contrast text for readability"
+      ],
+      "phase": 1,
+      "priority": "high",
+      "type": "firmware"
+    },
+    {
+      "id": "VB-008",
+      "title": "Auto-detect session start and stop",
+      "story": "As a rider, I want the session to start automatically when I begin pedaling and stop after a period of inactivity, so I don't need to press any buttons.",
+      "acceptance": [
+        "Session starts on first detected pulse",
+        "Session pauses after 30 seconds of no pulses",
+        "Session ends after 2 minutes of no pulses",
+        "Elapsed time only counts active pedaling time (excludes pauses)",
+        "Clear visual indicator of session state (active, paused, ended)"
+      ],
+      "phase": 1,
+      "priority": "medium",
+      "type": "firmware"
+    },
+    {
+      "id": "VB-009",
+      "title": "Log session data to SD card",
+      "story": "As a rider, I want my session data saved to the SD card so I can review past rides and track progress over time.",
+      "acceptance": [
+        "Session summary written to SD card as CSV on session end",
+        "Fields: date, start_time, duration, distance, avg_rpm, max_rpm, avg_speed, max_speed",
+        "Raw data log option: timestamped RPM readings (for future analysis)",
+        "File naming: YYYY-MM-DD_HH-MM.csv",
+        "Graceful handling if SD card is missing or full"
+      ],
+      "phase": 1,
+      "priority": "medium",
+      "type": "firmware"
+    }
+  ]
+}
