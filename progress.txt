@@ -7,6 +7,10 @@
 - Speed/distance are derived values — extend existing sketch rather than creating a new one
 - Use `#define` for bike-specific calibration constants (DISTANCE_PER_REV_M) so they're easy to tune
 - Distance accumulation uses pulse count delta, not RPM × time — more accurate, no drift from timing
+- TFT_eSPI User_Setup.h is at `~/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h` — must match the target board
+- ESP32-32E display pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21, RST=EN (shared)
+- Use ILI9341_2_DRIVER + HSPI port for this board (not ILI9341_DRIVER, not FSPI/VSPI)
+- Backlight on IO21: HIGH = on — must set manually with digitalWrite in setup()
 
 ---
 
@@ -49,4 +53,23 @@
   - Indoor bike distance conversion is a guess — 6.3m/rev is reasonable for ~3:1 gear ratio
   - Keep unit conversion in helper functions (rpmToSpeed, getDisplayDistance) so the main loop stays clean
   - `const char*` return type works fine for unit labels in Arduino/ESP32 — no need for String
+---
+
+## 2026-02-24 - VB-006: Set up Arduino CLI project and display Hello World
+- Configured TFT_eSPI `User_Setup.h` for ESP32-32E board (was incorrectly set for ESP32-S3)
+  - Driver: ILI9341_2_DRIVER, SPI port: HSPI
+  - Pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21, RST=-1 (shared with EN)
+  - SPI frequency: 55MHz read: 20MHz
+- Created `firmware/hello_world/hello_world.ino` — display test sketch
+  - Shows "VIBE BIKE" title, "Hello World!", board info, and pin mapping on screen
+  - Backlight enabled via IO21, portrait orientation (240x320)
+  - Uses TFT_eSPI drawing functions: fillScreen, drawString, drawLine
+- Compiles cleanly: 330KB flash (25%), 22KB RAM (6%)
+- Verified pulse_counter still compiles with updated User_Setup.h
+- Files changed: firmware/hello_world/hello_world.ino (new), prd.json (updated), docs/status.md, docs/worklog.md
+- **Learnings for future iterations:**
+  - User_Setup.h backup existed at `.backup` — the CYD config was the correct base for this board
+  - The ESP32-32E and CYD ESP32-2432S028R share the same SPI pin mapping for the display
+  - TFT_eSPI `tft.drawString()` with datum (TC_DATUM, TL_DATUM) handles alignment cleanly
+  - Always verify existing sketches still compile after changing User_Setup.h
 ---

@@ -96,7 +96,9 @@
       ],
       "phase": 1,
       "priority": "high",
-      "type": "firmware"
+      "type": "firmware",
+      "passes": true,
+      "notes": "TFT_eSPI User_Setup.h configured for ESP32-32E (ILI9341_2_DRIVER, HSPI, pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21). Hello world sketch at firmware/hello_world/hello_world.ino compiles cleanly (330KB flash, 22KB RAM)."
     },
     {
       "id": "VB-007",

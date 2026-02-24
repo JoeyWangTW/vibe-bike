@@ -32,3 +32,14 @@
 - Initiated autonomous work session via `/tst:project-work`
 - Stories to complete: 6 (VB-004 through VB-009)
 - Starting with: VB-006 — Set up Arduino CLI project and display Hello World
+
+## 2026-02-24 - VB-006: Display Hello World
+
+- Configured TFT_eSPI `User_Setup.h` for ESP32-32E board (was incorrectly set for ESP32-S3)
+  - Driver: ILI9341_2_DRIVER, SPI port: HSPI, pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21
+  - SPI frequency: 55MHz, backlight HIGH = on
+- Created `firmware/hello_world/hello_world.ino` — display test sketch
+  - Shows "VIBE BIKE" title, "Hello World!", board info, and pin mapping
+  - Turns on backlight via IO21, portrait orientation (240x320)
+- Compiles cleanly: 330KB flash (25%), 22KB RAM (6%)
+- Existing pulse_counter sketch still compiles with updated User_Setup.h
