@@ -1,30 +1,38 @@
 # Project Status
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-02-25
 
-**Current state:** Phase 1 COMPLETE — All 9 stories done. Dashboard with cadence, speed, distance, session management, and SD logging.
+**Current state:** Phase 3 COMPLETE — All 17 stories done. Full vibe bike dashboard with cadence, speed, distance, BLE heart rate, WiFi token tracking, and SD logging.
 
 ## Recently Completed
 
-- Project created
-- VP Cadence Cole planning session: vision, roadmap, and PRD defined
-- **VB-001:** Probed 2-pin connector — confirmed reed switch, 1 pulse/rev, no polarity
-- **VB-002:** GPIO confirmed — using IO35 (input-only) with 10K pull-up to 3.3V
-- **VB-003:** Wiring plan finalized — reed switch → IO35 + GND, hardware assumed working
-- **VB-004:** Pulse counter firmware — interrupt-driven RPM with debounce, smoothing, edge cases
-- **VB-005:** Speed & distance — configurable road-equivalent conversion, pulse-based distance accumulation, metric/imperial units
-- **VB-006:** Display setup — TFT_eSPI configured for ESP32-32E ILI9341V, Hello World sketch compiles
-- **VB-007:** Dashboard UI v1 — full ride dashboard with RPM, speed, distance, time, status bar
-- **VB-008:** Session auto-detect — state machine (READY/ACTIVE/PAUSED/ENDED), active-only timer
-- **VB-009:** SD card logging — raw data every 1s + session summary CSV, graceful if SD missing
+- **Phase 1** (VB-001 to VB-009): Pulse counting, RPM, speed, distance, TFT dashboard, session management, SD logging
+- **Phase 2** (VB-010 to VB-013): BLE heart rate from Coospo H808S chest strap
+  - VB-010: NimBLE-Arduino 2.3.7 installed, standalone BLE HR test sketch created
+  - VB-011: BLE client integrated into dashboard — scan, connect, subscribe, auto-reconnect
+  - VB-012: Compact display layout — RPM (font 6), speed/dist, time/HR, tokens/cost, status bar
+  - VB-013: HR in SD logging — heart_rate column in raw data, avg/max/min HR in summary
+- **Phase 3** (VB-014 to VB-017): WiFi + Anthropic Usage API token tracking
+  - VB-014: WiFi setup with auto-reconnect, status indicator on display
+  - VB-015: Anthropic Admin API integration — polls every 60s, tracks session token delta
+  - VB-016: Token display — session tokens (with K/M suffix) + estimated cost on dashboard
+  - VB-017: Combined logging (tokens in SD), docs updated, CLAUDE.md updated
+
+## Technical Notes
+
+- Partition scheme changed to `min_spiffs` (BLE+WiFi+HTTPS needs ~1.4MB flash vs 1.3MB default)
+- ArduinoJson 7.4.2 added for API response parsing
+- WiFi and token tracking are optional — leave WIFI_SSID and ANTHROPIC_ADMIN_KEY empty to disable
+- BLE and WiFi coexist on the ESP32 radio (NimBLE handles time-slicing)
 
 ## In Progress
 
-- (Phase 1 complete!)
+- (All phases complete!)
 
 ## Up Next
 
-- **Phase 2:** BLE heart rate monitor integration
+- Hardware testing: upload firmware, validate BLE HR connection, test WiFi+API
+- Physical mounting of display on bike
 
 ## Blockers
 

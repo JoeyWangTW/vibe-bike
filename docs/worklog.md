@@ -91,3 +91,50 @@
 - All 9 user stories (VB-001 through VB-009) are now passing
 - Main production sketch: `firmware/bike_dashboard/bike_dashboard.ino`
 - Capabilities: pulse counting, RPM smoothing, speed/distance, TFT dashboard, session management, SD logging
+
+## 2026-02-25 - Phase 2 & 3: BLE Heart Rate + Token Tracking
+
+- **VB-010:** Installed NimBLE-Arduino 2.3.7, created `firmware/test_ble_hr/test_ble_hr.ino`
+  - Standalone BLE HR test: scans for H808S/CooSpo or HR Service UUID 0x180D
+  - Connects, subscribes to HR Measurement (0x2A37), prints BPM to serial
+  - Auto-reconnect on disconnect (restart scan)
+  - Compiles: 602KB flash (45%), 36KB RAM (10%)
+- **VB-011:** Integrated BLE HR into `bike_dashboard.ino`
+  - NimBLE scan/connect runs in background (FreeRTOS task thread)
+  - Notification callback updates `volatile currentHR` — same pattern as pulse ISR
+  - `hrConnected` state flag, auto-reconnect via scan restart on disconnect
+  - Parses HR measurement flags (8-bit vs 16-bit format)
+- **VB-012:** Redesigned display — compact all-in-one layout
+  - RPM: shrunk from font 7 to font 6 (saves ~50px vertical)
+  - Speed/Distance row: labels + values + units (font 4)
+  - Time/HR row: elapsed time + heart rate with bpm unit
+  - Tokens/Cost row: session token delta + estimated cost (Phase 3)
+  - Status bar: session state + revolution count
+  - Status indicators: SD, WiFi (W), BLE (B) in title bar
+- **VB-013:** Added HR to SD card logging
+  - Raw data: `elapsed_sec,rpm,speed,distance,heart_rate,pulses`
+  - Session summary: avg_hr, max_hr, min_hr fields added
+  - HR=0 when strap not connected (doesn't skip logging)
+- **VB-014:** WiFi setup on ESP32
+  - Credentials via `WIFI_SSID`/`WIFI_PASSWORD` defines (leave empty to skip)
+  - Connects at boot with 10s timeout, auto-reconnect every 30s
+  - WiFi status indicator (W) in title bar — green/red
+  - WiFi + BLE coexist via NimBLE radio time-slicing
+- **VB-015:** Anthropic Usage API integration
+  - Calls `GET /v1/organizations/usage` with Admin API key
+  - WiFiClientSecure with HTTPS (insecure cert for personal project)
+  - ArduinoJson 7.4.2 for response parsing
+  - Tracks session token delta: baseline on first pedal, poll every 60s
+  - Calculates estimated cost from input/output token pricing
+- **VB-016:** Token display on dashboard
+  - Session tokens with K/M suffix (e.g., "45.2K", "1.3M")
+  - Estimated cost (e.g., "$1.87")
+  - Grayed out when WiFi disconnected, "..." while loading
+- **VB-017:** Combined session logging + docs update
+  - tokens_used and estimated_cost added to session summary CSV
+  - Updated CLAUDE.md: partition scheme, WiFi config, phase status
+  - Updated docs/status.md, docs/worklog.md
+- **Build notes:**
+  - Partition scheme changed from default to `min_spiffs` (1.4MB / 1.9MB = 70%)
+  - FQBN: `esp32:esp32:esp32:PartitionScheme=min_spiffs`
+  - Total flash: 1390KB (70%), RAM: 60KB (18%)

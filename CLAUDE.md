@@ -15,26 +15,30 @@ A personal fitness-meets-vibe-coding dashboard. Turns a broken indoor bike into 
   - Onboard: LCD (SPI), resistive touch, SD card slot, RGB LEDs, audio amp
   - **Free GPIOs:** IO35 (input-only, best for sensor), IO27 (may conflict with SPI)
   - Display docs: https://www.lcdwiki.com/2.8inch_ESP32-32E_Display
-- **Heart rate strap** — BLE chest strap (Phase 2)
+- **Heart rate strap** — Coospo H808S BLE chest strap (HR Service UUID 0x180D)
 
 ## Project Conventions
 
 ### Firmware
 - Use **arduino-cli** for builds (NOT PlatformIO)
-- FQBN: `esp32:esp32:esp32` (ESP32 core 3.3.7 installed)
-- USB port: `/dev/cu.usbmodem2101`
+- FQBN: `esp32:esp32:esp32:PartitionScheme=min_spiffs` (ESP32 core 3.3.7, min_spiffs needed for BLE+WiFi+HTTPS)
+- USB port: `/dev/cu.usbserial-1120` (CH340, for upload) — `/dev/cu.usbmodem2101` is native USB (serial monitor only)
 - Display library: **TFT_eSPI** 2.5.43 (installed, needs User_Setup.h configured for ILI9341 SPI pins)
-- BLE library: **NimBLE** (lighter than Arduino BLE)
+- BLE library: **NimBLE-Arduino** 2.3.7 (lighter than Arduino BLE)
+- JSON library: **ArduinoJson** 7.4.2 (for API response parsing)
 - Sketches go in `firmware/<sketch-name>/<sketch-name>.ino` (Arduino sketch format)
 - Test sketches in `firmware/test_<name>/test_<name>.ino`
 
 ### Build Commands
 ```bash
-# Compile
-arduino-cli compile -b esp32:esp32:esp32 firmware/<sketch-name>
+# Compile (main dashboard — needs min_spiffs for BLE+WiFi+HTTPS)
+arduino-cli compile -b esp32:esp32:esp32:PartitionScheme=min_spiffs firmware/bike_dashboard
+
+# Compile (test sketches — default partition is fine)
+arduino-cli compile -b esp32:esp32:esp32 firmware/test_<name>
 
 # Upload
-arduino-cli upload -b esp32:esp32:esp32 -p /dev/cu.usbmodem2101 firmware/<sketch-name>
+arduino-cli upload -b esp32:esp32:esp32:PartitionScheme=min_spiffs -p /dev/cu.usbmodem2101 firmware/bike_dashboard
 
 # Serial monitor
 arduino-cli monitor -p /dev/cu.usbmodem2101 -c baudrate=115200
@@ -58,14 +62,20 @@ If upload fails with "Failed to connect to ESP32", hold the BOOT button on the b
 | **Bike sensor** | **IO35 (input-only, 10K pull-up to 3.3V)** |
 | Available | IO27 |
 
+### WiFi & API Configuration
+- WiFi credentials: set `WIFI_SSID` and `WIFI_PASSWORD` in `bike_dashboard.ino` (or leave empty to skip WiFi)
+- Anthropic Admin API key: set `ANTHROPIC_ADMIN_KEY` in `bike_dashboard.ino` (get from console.anthropic.com > Settings > Admin API Keys)
+- Token tracking is optional — dashboard works without WiFi/API key
+
 ### Data Format
-- Session logs: CSV on SD card, named `YYYY-MM-DD_HH-MM.csv`
-- Fields: timestamp, rpm, speed, distance, heart_rate (Phase 2), tokens (Phase 3)
+- Session logs: CSV on SD card, named `session_NNNN.csv` (auto-incrementing)
+- Raw data fields: `elapsed_sec,rpm,speed,distance,heart_rate,pulses`
+- Session summary includes: duration, distance, avg/max RPM, avg/max speed, avg/max/min HR, tokens_used, estimated_cost
 
 ### Phases
-- **Phase 1 (current):** Bike cadence/speed data on screen
-- **Phase 2:** BLE heart rate monitor integration
-- **Phase 3:** Claude Code token tracking + combined vibe coding dashboard
+- **Phase 1 (complete):** Bike cadence/speed data on screen + SD logging
+- **Phase 2 (complete):** BLE heart rate from Coospo H808S chest strap
+- **Phase 3 (complete):** WiFi + Anthropic Usage API token tracking on display
 
 ## Work Documentation
 
