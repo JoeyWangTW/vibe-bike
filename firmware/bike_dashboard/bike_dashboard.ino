@@ -1,6 +1,6 @@
 // bike_dashboard.ino — Vibe Bike Dashboard (VB-004 through VB-017)
 // Pulse counter + speed/distance + TFT display + session auto-detect + SD logging
-// + BLE heart rate (Phase 2) + WiFi token tracking (Phase 3).
+// + BLE heart rate (Phase 2) + WiFi Claude Code stats tracking (Phase 3).
 //
 // Board: ESP32-32E with ILI9341V (240x320)
 // Wiring:
@@ -18,26 +18,25 @@
 #include <TFT_eSPI.h>
 #include <SD.h>
 #include <SPI.h>
-#include <NimBLEDevice.h>
+#include <BLEDevice.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <BLEClient.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <math.h>
+#include <Preferences.h>
+#include "config.h"  // WiFi + stats server + BLE config (copy config.example.h → config.h)
 
-// ── WiFi Configuration ─────────────────────────────────────────
-// Set your WiFi credentials here, or leave empty to skip WiFi
-#define WIFI_SSID         ""
-#define WIFI_PASSWORD     ""
+// Fallback for older config.h without BLE setting
+#ifndef BLE_HR_DEVICE_NAME
+#define BLE_HR_DEVICE_NAME  ""
+#endif
+
+// ── WiFi / Stats Settings ────────────────────────────────────
 #define WIFI_TIMEOUT_MS   10000
-
-// ── Anthropic API Configuration ────────────────────────────────
-// Set your Admin API key here, or leave empty to skip token tracking
-#define ANTHROPIC_ADMIN_KEY  ""
-#define API_POLL_INTERVAL_MS 60000  // Poll every 60 seconds
-
-// Anthropic pricing (per million tokens) — Claude Sonnet 4
-#define INPUT_COST_PER_M   3.00
-#define OUTPUT_COST_PER_M  15.00
+#define STATS_POLL_INTERVAL_MS 30000  // Poll every 30 seconds
 
 // ── Sensor Configuration ─────────────────────────────────────
 #define SENSOR_PIN        35
@@ -74,22 +73,47 @@
 #define TIME_COLOR        0xFD20
 #define HR_COLOR          TFT_RED
 #define TOKEN_COLOR       0xF81F    // Magenta
-#define COST_COLOR        0x07FF    // Cyan-ish
+#define MSGS_COLOR        0x07FF    // Cyan-ish
 #define DIVIDER_COLOR     0x2104
 #define STATUS_ACTIVE     TFT_GREEN
 #define STATUS_PAUSED     TFT_YELLOW
 #define STATUS_ENDED      TFT_RED
 #define STATUS_READY      0x7BEF
 #define DIMMED_COLOR      0x4208    // Gray for disconnected values
+#define HR_ZONE_IN_COLOR  0x0400    // Dark green background for in-zone
+#define HR_ZONE_OUT_COLOR TFT_RED   // Red for out-of-zone flash
+#define BUTTON_COLOR      0x4A69    // Gray button fill
+#define BUTTON_TEXT_COLOR TFT_WHITE
+#define TOGGLE_ON_COLOR   0x07E0    // Green
+#define TOGGLE_OFF_COLOR  TFT_RED
+
+// ── Touch Configuration (XPT2046 bit-bang SPI) ───────────────
+#define TOUCH_MOSI  32
+#define TOUCH_MISO  39
+#define TOUCH_CLK   25
+#define TOUCH_CS    33
+#define TOUCH_IRQ   36
+#define TOUCH_DEBOUNCE_MS 300
+// Calibration from raw diagnostic (raw ADC → screen pixels)
+#define TOUCH_RAW_X_MIN  185
+#define TOUCH_RAW_X_MAX  1770
+#define TOUCH_RAW_Y_MIN  150
+#define TOUCH_RAW_Y_MAX  1840
+#define TOUCH_PRESSURE_MIN 50  // Z1 threshold for real touch
+
+// ── Page State ───────────────────────────────────────────────
+enum PageState {
+    PAGE_DASHBOARD,
+    PAGE_HR_ZONE_SETTINGS
+};
 
 // ── Compact Layout (240x320 portrait) ────────────────────────
 // Title bar
 #define TITLE_Y       4
-// RPM section
-#define RPM_VALUE_Y   32
-#define RPM_LABEL_Y   72
+// RPM section (value centered, "RPM" label drawn to the right dynamically)
+#define RPM_VALUE_Y   28
 // Divider 1
-#define DIV1_Y        90
+#define DIV1_Y        80
 // Speed / Distance row
 #define SPEED_LABEL_Y 94
 #define SPEED_VALUE_Y 112
@@ -107,11 +131,11 @@
 #define HR_UNIT_Y     226
 // Divider 3
 #define DIV3_Y        246
-// Tokens / Cost row
+// Tokens / Messages row
 #define TOKEN_LABEL_Y 250
 #define TOKEN_VALUE_Y 268
-#define COST_LABEL_Y  250
-#define COST_VALUE_Y  268
+#define MSGS_LABEL_Y  250
+#define MSGS_VALUE_Y  268
 // Divider 4
 #define DIV4_Y        294
 // Status bar
@@ -121,6 +145,18 @@
 #define RIGHT_COL     180
 
 TFT_eSPI tft = TFT_eSPI();
+Preferences prefs;
+
+// ── Page & Touch State ───────────────────────────────────────
+PageState currentPage = PAGE_DASHBOARD;
+unsigned long lastTouchTime = 0;
+
+// ── HR Zone State ────────────────────────────────────────────
+bool hrZoneEnabled = false;
+uint16_t hrZoneUpper = 160;
+uint16_t hrZoneLower = 120;
+bool hrZoneFlashState = false;        // Toggles for out-of-zone flash
+unsigned long lastZoneFlashTime = 0;
 
 // ── Session States ───────────────────────────────────────────
 enum SessionState {
@@ -201,13 +237,14 @@ unsigned long lastRawLogTime = 0;
 bool sessionLogged = false;
 
 // ── BLE Heart Rate State ─────────────────────────────────────
-static NimBLEUUID hrServiceUUID("180D");
-static NimBLEUUID hrCharUUID("2A37");
-static NimBLEClient* pBLEClient = nullptr;
+static BLEUUID hrServiceUUID("180D");
+static BLEUUID hrCharUUID("2A37");
+static BLEClient* pBLEClient = nullptr;
 static volatile uint16_t currentHR = 0;
 static volatile bool hrConnected = false;
 static bool bleDoConnect = false;
-static NimBLEAdvertisedDevice* bleTargetDevice = nullptr;
+static BLEAdvertisedDevice* bleTargetDevice = nullptr;
+static unsigned long lastBleScanTime = 0;
 
 // HR session stats
 uint16_t maxHR = 0;
@@ -215,21 +252,23 @@ uint16_t minHR = 0;    // Min non-zero HR during session
 double sumHR = 0;
 unsigned long hrSampleCount = 0;
 
-// ── WiFi & Token State ───────────────────────────────────────
+// ── WiFi & Stats State ───────────────────────────────────────
 bool wifiEnabled = false;
 bool wifiConnected = false;
-bool tokenTrackingEnabled = false;
-unsigned long lastApiPollTime = 0;
+bool statsTrackingEnabled = false;
+unsigned long lastStatsPollTime = 0;
 
-// Token tracking
-unsigned long sessionStartInputTokens = 0;
-unsigned long sessionStartOutputTokens = 0;
-unsigned long latestInputTokens = 0;
-unsigned long latestOutputTokens = 0;
+// Stats from Claude Code (via local stats server)
+unsigned long sessionStartTokens = 0;
+unsigned long sessionStartMsgs = 0;
+unsigned long latestTokens = 0;
+unsigned long latestMsgs = 0;
 unsigned long sessionTokensDelta = 0;
-float sessionCost = 0.0;
-bool tokenDataValid = false;
-bool initialTokenFetchDone = false;
+unsigned long sessionMsgsDelta = 0;
+unsigned long todayTokens = 0;
+unsigned long todayMsgs = 0;
+bool statsDataValid = false;
+bool initialStatsFetchDone = false;
 
 // Previous display values (for dirty-region updates)
 int prevRpmInt = -1;
@@ -239,7 +278,7 @@ int prevTimeSec = -1;
 int prevHR = -1;
 bool prevHRConnected = false;
 long prevTokensK = -1;
-int prevCostCents = -1;
+long prevMsgs = -1;
 SessionState prevDisplayState = SESSION_READY;
 unsigned long prevDisplayPulses = 0;
 bool firstDraw = true;
@@ -265,11 +304,11 @@ unsigned long getActiveTimeMs(unsigned long now) {
     return accumulatedActiveMs;
 }
 
-// ── BLE Heart Rate ───────────────────────────────────────────
+// ── BLE Heart Rate (built-in ESP32 BLE) ──────────────────────
 
-// Notification callback — called on NimBLE task thread
-void hrNotifyCallback(NimBLERemoteCharacteristic* pChar,
-                      uint8_t* pData, size_t length, bool isNotify) {
+// Notification callback
+static void hrNotifyCallback(BLERemoteCharacteristic* pChar,
+                             uint8_t* pData, size_t length, bool isNotify) {
     if (length < 2) return;
 
     uint16_t hr;
@@ -280,118 +319,125 @@ void hrNotifyCallback(NimBLERemoteCharacteristic* pChar,
     }
 
     currentHR = hr;
-    Serial.printf("HR: %d bpm\n", hr);
 }
 
-class HRClientCallbacks : public NimBLEClientCallbacks {
-    void onConnect(NimBLEClient* pClient) override {
+class HRClientCallbacks : public BLEClientCallbacks {
+    void onConnect(BLEClient* pClient) override {
         hrConnected = true;
         Serial.println("BLE: Connected to HR strap");
     }
-
-    void onDisconnect(NimBLEClient* pClient, int reason) override {
+    void onDisconnect(BLEClient* pClient) override {
         hrConnected = false;
         currentHR = 0;
-        Serial.printf("BLE: HR strap disconnected (reason=%d)\n", reason);
+        Serial.println("BLE: HR strap disconnected");
     }
 };
 
-static HRClientCallbacks bleCB;
+class HRScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) override {
+        String name = String(advertisedDevice.getName().c_str());
+        bool hasHRService = advertisedDevice.haveServiceUUID() &&
+                            advertisedDevice.isAdvertisingService(hrServiceUUID);
 
-class HRScanCallbacks : public NimBLEScanCallbacks {
-    void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
-        String name = String(advertisedDevice->getName().c_str());
-        bool hasHRService = advertisedDevice->isAdvertisingService(hrServiceUUID);
+        bool nameMatch = (strlen(BLE_HR_DEVICE_NAME) > 0) ?
+                          (name.indexOf(BLE_HR_DEVICE_NAME) >= 0) : false;
 
-        if (hasHRService || name.startsWith("H808S") || name.startsWith("CooSpo")) {
+        if (hasHRService || nameMatch) {
             Serial.printf("BLE: Found HR device: %s [%s]\n",
                           name.c_str(),
-                          advertisedDevice->getAddress().toString().c_str());
-            NimBLEDevice::getScan()->stop();
-            bleTargetDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
+                          advertisedDevice.getAddress().toString().c_str());
+            advertisedDevice.getScan()->stop();
+            bleTargetDevice = new BLEAdvertisedDevice(advertisedDevice);
             bleDoConnect = true;
         }
     }
-
-    void onScanEnd(const NimBLEScanResults& results, int reason) override {
-        if (!bleDoConnect && !hrConnected) {
-            Serial.println("BLE: Scan ended, restarting...");
-            NimBLEDevice::getScan()->start(10000);
-        }
-    }
 };
-
-static HRScanCallbacks bleScanCB;
 
 bool connectToHR() {
     if (!bleTargetDevice) return false;
 
-    if (!pBLEClient) {
-        pBLEClient = NimBLEDevice::createClient();
-        pBLEClient->setClientCallbacks(&bleCB);
-    }
+    pBLEClient = BLEDevice::createClient();
+    pBLEClient->setClientCallbacks(new HRClientCallbacks());
 
-    Serial.printf("BLE: Connecting to %s...\n", bleTargetDevice->getAddress().toString().c_str());
+    Serial.printf("BLE: Connecting to %s...\n",
+                  bleTargetDevice->getAddress().toString().c_str());
 
     if (!pBLEClient->connect(bleTargetDevice)) {
         Serial.println("BLE: Connection failed");
         return false;
     }
 
-    NimBLERemoteService* pService = pBLEClient->getService(hrServiceUUID);
+    BLERemoteService* pService = pBLEClient->getService(hrServiceUUID);
     if (!pService) {
         Serial.println("BLE: HR service not found");
         pBLEClient->disconnect();
         return false;
     }
 
-    NimBLERemoteCharacteristic* pChar = pService->getCharacteristic(hrCharUUID);
+    BLERemoteCharacteristic* pChar = pService->getCharacteristic(hrCharUUID);
     if (!pChar) {
         Serial.println("BLE: HR characteristic not found");
         pBLEClient->disconnect();
         return false;
     }
 
-    if (!pChar->subscribe(true, hrNotifyCallback)) {
-        Serial.println("BLE: Failed to subscribe");
+    if (pChar->canNotify()) {
+        pChar->registerForNotify(hrNotifyCallback);
+        Serial.println("BLE: Subscribed to HR notifications");
+    } else {
+        Serial.println("BLE: Characteristic doesn't support notify");
         pBLEClient->disconnect();
         return false;
     }
 
-    Serial.println("BLE: Subscribed to HR notifications");
     return true;
 }
 
-void initBLE() {
-    NimBLEDevice::init("VibeBike");
+static HRScanCallbacks hrScanCB;
+static bool bleScanActive = false;
 
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setScanCallbacks(&bleScanCB);
+void initBLE() {
+    BLEDevice::init("VibeBike");
+
+    BLEScan* pScan = BLEDevice::getScan();
+    pScan->setAdvertisedDeviceCallbacks(&hrScanCB, false);
     pScan->setActiveScan(true);
     pScan->setInterval(100);
     pScan->setWindow(99);
 
     Serial.println("BLE: Starting scan for HR devices...");
-    pScan->start(10000);
+    pScan->start(0, nullptr, false);  // Continuous background scan
+    bleScanActive = true;
 }
 
 void handleBLE() {
     // Handle pending connection from scan callback
     if (bleDoConnect) {
         bleDoConnect = false;
-        if (!connectToHR()) {
+
+        BLEDevice::getScan()->stop();
+        bleScanActive = false;
+
+        if (connectToHR()) {
             delete bleTargetDevice;
             bleTargetDevice = nullptr;
-            NimBLEDevice::getScan()->start(10000);
-        } else {
-            delete bleTargetDevice;
-            bleTargetDevice = nullptr;
+            return;
         }
+        delete bleTargetDevice;
+        bleTargetDevice = nullptr;
     }
 
-    // Auto-reconnect if disconnected and not scanning
-    if (!hrConnected && !bleDoConnect && !NimBLEDevice::getScan()->isScanning()) {
-        NimBLEDevice::getScan()->start(10000);
+    // Restart scan if not connected and scan not running
+    if (!hrConnected && !bleDoConnect && !bleScanActive) {
+        unsigned long now = millis();
+        if (now - lastBleScanTime > 5000) {
+            lastBleScanTime = now;
+            Serial.println("BLE: Restarting scan...");
+            BLEScan* pScan = BLEDevice::getScan();
+            pScan->clearResults();
+            pScan->start(0, nullptr, false);
+            bleScanActive = true;
+        }
     }
 }
 
@@ -422,10 +468,11 @@ void initWiFi() {
         Serial.println("WiFi: Connection failed (will retry in background)");
     }
 
-    // Enable token tracking if API key is set
-    if (strlen(ANTHROPIC_ADMIN_KEY) > 0) {
-        tokenTrackingEnabled = true;
-        Serial.println("WiFi: Token tracking enabled");
+    // Enable stats tracking if server IP is set
+    if (strlen(STATS_SERVER_IP) > 0) {
+        statsTrackingEnabled = true;
+        Serial.printf("WiFi: Stats tracking enabled (server: %s:%d)\n",
+                      STATS_SERVER_IP, STATS_SERVER_PORT);
     }
 }
 
@@ -453,58 +500,23 @@ void handleWiFi() {
     }
 }
 
-// ── Anthropic Usage API ──────────────────────────────────────
+// ── Claude Code Stats (via local HTTP server) ────────────────
 
-// Get today's date as YYYY-MM-DD string
-void getTodayDate(char* buf, size_t len) {
-    // Use compile date as fallback; in production, NTP would be better
-    // For now, use the API response timestamps
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    gmtime_r(&now, &timeinfo);
-
-    if (timeinfo.tm_year > 100) {  // Valid time (after 2000)
-        strftime(buf, len, "%Y-%m-%d", &timeinfo);
-    } else {
-        // Fallback: use a broad date range
-        strncpy(buf, "2026-02-25", len);
-    }
-}
-
-bool fetchTokenUsage(unsigned long* inputTokens, unsigned long* outputTokens) {
-    if (!wifiConnected || !tokenTrackingEnabled) return false;
-
-    WiFiClientSecure client;
-    client.setInsecure();  // Skip cert verification (acceptable for personal project)
+bool fetchStats(unsigned long* outTokens, unsigned long* outMsgs) {
+    if (!wifiConnected || !statsTrackingEnabled) return false;
 
     HTTPClient http;
 
-    char startDate[16], endDate[16];
-    getTodayDate(startDate, sizeof(startDate));
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:%d/stats", STATS_SERVER_IP, STATS_SERVER_PORT);
 
-    // End date = tomorrow (API uses exclusive end)
-    // Simple approach: just use same date for both, API returns today's data
-    strncpy(endDate, startDate, sizeof(endDate));
-
-    // Build URL
-    char url[256];
-    snprintf(url, sizeof(url),
-             "https://api.anthropic.com/v1/organizations/usage?start_date=%s&end_date=%s",
-             startDate, endDate);
-
-    http.begin(client, url);
-    http.addHeader("x-api-key", ANTHROPIC_ADMIN_KEY);
-    http.addHeader("anthropic-version", "2023-06-01");
+    http.begin(url);
+    http.setTimeout(5000);
 
     int httpCode = http.GET();
 
     if (httpCode != 200) {
-        Serial.printf("API: HTTP %d\n", httpCode);
-        if (httpCode > 0) {
-            String body = http.getString();
-            Serial.printf("API: %s\n", body.substring(0, 200).c_str());
-        }
+        Serial.printf("Stats: HTTP %d\n", httpCode);
         http.end();
         return false;
     }
@@ -512,66 +524,49 @@ bool fetchTokenUsage(unsigned long* inputTokens, unsigned long* outputTokens) {
     String payload = http.getString();
     http.end();
 
-    // Parse JSON response
+    // Parse JSON: {"date":"...","messages":N,"sessions":N,"toolCalls":N,"outputTokens":N}
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (err) {
-        Serial.printf("API: JSON parse error: %s\n", err.c_str());
+        Serial.printf("Stats: JSON error: %s\n", err.c_str());
         return false;
     }
 
-    // Sum up all input and output tokens from the response
-    unsigned long totalInput = 0;
-    unsigned long totalOutput = 0;
+    *outTokens = doc["outputTokens"] | 0UL;
+    *outMsgs = doc["messages"] | 0UL;
 
-    // The usage endpoint returns data array
-    JsonArray data = doc["data"].as<JsonArray>();
-    if (data) {
-        for (JsonObject item : data) {
-            totalInput += item["input_tokens"].as<unsigned long>();
-            totalOutput += item["output_tokens"].as<unsigned long>();
-        }
-    } else {
-        // Single object response
-        totalInput = doc["input_tokens"] | 0UL;
-        totalOutput = doc["output_tokens"] | 0UL;
-    }
-
-    *inputTokens = totalInput;
-    *outputTokens = totalOutput;
-
-    Serial.printf("API: Tokens today — input: %lu, output: %lu\n", totalInput, totalOutput);
+    Serial.printf("Stats: tokens=%lu msgs=%lu\n", *outTokens, *outMsgs);
     return true;
 }
 
-void handleTokenTracking(unsigned long now) {
-    if (!tokenTrackingEnabled || !wifiConnected) return;
+void handleStatsTracking(unsigned long now) {
+    if (!statsTrackingEnabled || !wifiConnected) return;
 
     // Poll at interval
-    if (now - lastApiPollTime < API_POLL_INTERVAL_MS && lastApiPollTime > 0) return;
-    lastApiPollTime = now;
+    if (now - lastStatsPollTime < STATS_POLL_INTERVAL_MS && lastStatsPollTime > 0) return;
+    lastStatsPollTime = now;
 
-    unsigned long input, output;
-    if (!fetchTokenUsage(&input, &output)) return;
+    unsigned long tokens, msgs;
+    if (!fetchStats(&tokens, &msgs)) return;
 
-    latestInputTokens = input;
-    latestOutputTokens = output;
-    tokenDataValid = true;
+    latestTokens = tokens;
+    latestMsgs = msgs;
+    todayTokens = tokens;
+    todayMsgs = msgs;
+    statsDataValid = true;
 
     // On first fetch during a session, record baseline
-    if (!initialTokenFetchDone && sessionState == SESSION_ACTIVE) {
-        sessionStartInputTokens = input;
-        sessionStartOutputTokens = output;
-        initialTokenFetchDone = true;
-        Serial.printf("API: Session baseline — input: %lu, output: %lu\n", input, output);
+    if (!initialStatsFetchDone && sessionState == SESSION_ACTIVE) {
+        sessionStartTokens = tokens;
+        sessionStartMsgs = msgs;
+        initialStatsFetchDone = true;
+        Serial.printf("Stats: Session baseline — tokens=%lu msgs=%lu\n", tokens, msgs);
     }
 
     // Calculate session delta
-    if (initialTokenFetchDone) {
-        unsigned long deltaInput = latestInputTokens - sessionStartInputTokens;
-        unsigned long deltaOutput = latestOutputTokens - sessionStartOutputTokens;
-        sessionTokensDelta = deltaInput + deltaOutput;
-        sessionCost = (deltaInput * INPUT_COST_PER_M + deltaOutput * OUTPUT_COST_PER_M) / 1000000.0;
+    if (initialStatsFetchDone) {
+        sessionTokensDelta = latestTokens - sessionStartTokens;
+        sessionMsgsDelta = latestMsgs - sessionStartMsgs;
     }
 }
 
@@ -671,9 +666,9 @@ void writeSessionSummary() {
     f.printf("# avg_hr,%.0f\n", avgHR);
     f.printf("# max_hr,%u\n", maxHR);
     f.printf("# min_hr,%u\n", minHR);
-    if (tokenDataValid && initialTokenFetchDone) {
-        f.printf("# tokens_used,%lu\n", sessionTokensDelta);
-        f.printf("# estimated_cost,%.2f\n", sessionCost);
+    if (statsDataValid && initialStatsFetchDone) {
+        f.printf("# tokens_during_ride,%lu\n", sessionTokensDelta);
+        f.printf("# msgs_during_ride,%lu\n", sessionMsgsDelta);
     }
     f.close();
 
@@ -693,9 +688,9 @@ void writeSessionSummary() {
         sf.printf("avg_hr,bpm,%.0f\n", avgHR);
         sf.printf("max_hr,bpm,%u\n", maxHR);
         sf.printf("min_hr,bpm,%u\n", minHR);
-        if (tokenDataValid && initialTokenFetchDone) {
-            sf.printf("tokens_used,count,%lu\n", sessionTokensDelta);
-            sf.printf("estimated_cost,usd,%.2f\n", sessionCost);
+        if (statsDataValid && initialStatsFetchDone) {
+            sf.printf("tokens_during_ride,count,%lu\n", sessionTokensDelta);
+            sf.printf("msgs_during_ride,count,%lu\n", sessionMsgsDelta);
         }
         sf.close();
         Serial.printf("SD: Summary written to %s\n", summaryFile);
@@ -703,6 +698,312 @@ void writeSessionSummary() {
 
     Serial.printf("SD: Session %d saved. Duration: %lus, Dist: %.2f %s, Avg RPM: %.1f, Avg HR: %.0f\n",
                   sessionNumber, durationSec, dist, distUnit(), avgRpm, avgHR);
+}
+
+// ── Icon Drawing ──────────────────────────────────────────────
+
+// Icon positions in title bar
+#define HEART_CX    188
+#define HEART_CY    12
+#define WIFI_CX     210
+#define WIFI_DOT_Y  18
+
+void drawHeartIcon(uint16_t color) {
+    int cx = HEART_CX, cy = HEART_CY;
+    // Two circles for the top bumps
+    tft.fillCircle(cx - 3, cy - 1, 3, color);
+    tft.fillCircle(cx + 3, cy - 1, 3, color);
+    // Triangle for the bottom point
+    tft.fillTriangle(cx - 5, cy + 1, cx + 5, cy + 1, cx, cy + 7, color);
+}
+
+void drawWiFiIcon(uint16_t color) {
+    int cx = WIFI_CX, by = WIFI_DOT_Y;
+    // Dot at bottom
+    tft.fillCircle(cx, by, 1, color);
+    // 3 arcs fanning upward
+    for (int ring = 1; ring <= 3; ring++) {
+        int r = ring * 3;
+        for (int deg = 40; deg <= 140; deg++) {
+            float rad = deg * 0.01745329f;
+            int x = cx + (int)(r * cosf(rad) + 0.5f);
+            int y = by - (int)(r * sinf(rad) + 0.5f);
+            tft.drawPixel(x, y, color);
+        }
+    }
+}
+
+void updateBLEIndicator() {
+    tft.fillRect(HEART_CX - 7, HEART_CY - 5, 15, 14, BG_COLOR);
+    drawHeartIcon(hrConnected ? HR_COLOR : DIMMED_COLOR);
+}
+
+void updateWiFiIndicator() {
+    if (!wifiEnabled) return;
+    tft.fillRect(WIFI_CX - 10, WIFI_DOT_Y - 12, 21, 15, BG_COLOR);
+    drawWiFiIcon(wifiConnected ? TFT_GREEN : DIMMED_COLOR);
+}
+
+// ── Touch Functions (raw XPT2046 bit-bang SPI) ───────────────
+
+int touchSpiRead(byte command) {
+    int result = 0;
+    for (int i = 7; i >= 0; i--) {
+        digitalWrite(TOUCH_MOSI, (command >> i) & 1);
+        digitalWrite(TOUCH_CLK, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(TOUCH_CLK, LOW);
+        delayMicroseconds(10);
+    }
+    for (int i = 11; i >= 0; i--) {
+        digitalWrite(TOUCH_CLK, HIGH);
+        delayMicroseconds(10);
+        result |= (digitalRead(TOUCH_MISO) << i);
+        digitalWrite(TOUCH_CLK, LOW);
+        delayMicroseconds(10);
+    }
+    return result;
+}
+
+void initTouch() {
+    pinMode(TOUCH_MOSI, OUTPUT);
+    pinMode(TOUCH_MISO, INPUT);
+    pinMode(TOUCH_CLK, OUTPUT);
+    pinMode(TOUCH_CS, OUTPUT);
+    pinMode(TOUCH_IRQ, INPUT);
+    digitalWrite(TOUCH_CS, HIGH);
+    digitalWrite(TOUCH_CLK, LOW);
+    Serial.println("Touch: Initialized (raw bit-bang SPI)");
+}
+
+bool readTouch(int* x, int* y) {
+    if (digitalRead(TOUCH_IRQ) != LOW) return false;
+
+    unsigned long now = millis();
+    if (now - lastTouchTime < TOUCH_DEBOUNCE_MS) return false;
+    lastTouchTime = now;
+
+    // Read raw values (disable interrupts to protect bit-bang timing
+    // from BLE/WiFi/pulse ISR corrupting the SPI signals)
+    noInterrupts();
+    digitalWrite(TOUCH_CS, LOW);
+    int rawX = touchSpiRead(0xD0);
+    int rawY = touchSpiRead(0x90);
+    int rawZ1 = touchSpiRead(0xB0);
+    digitalWrite(TOUCH_CS, HIGH);
+    interrupts();
+
+    // Check pressure
+    if (rawZ1 < TOUCH_PRESSURE_MIN) return false;
+
+    // Map raw ADC to screen coordinates (X is inverted on this panel)
+    *x = map(rawX, TOUCH_RAW_X_MAX, TOUCH_RAW_X_MIN, 0, 240);
+    *y = map(rawY, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX, 0, 320);
+    *x = constrain(*x, 0, 240);
+    *y = constrain(*y, 0, 320);
+
+    Serial.printf("Touch: x=%d y=%d (raw %d,%d z=%d)\n", *x, *y, rawX, rawY, rawZ1);
+    return true;
+}
+
+// ── HR Zone Persistence ──────────────────────────────────────
+
+void loadHRZoneSettings() {
+    prefs.begin("hrzone", true);  // read-only
+    hrZoneEnabled = prefs.getBool("enabled", false);
+    hrZoneUpper = prefs.getUShort("upper", 160);
+    hrZoneLower = prefs.getUShort("lower", 120);
+    prefs.end();
+    Serial.printf("HR Zone: loaded — %s, %u-%u bpm\n",
+                  hrZoneEnabled ? "ON" : "OFF", hrZoneLower, hrZoneUpper);
+}
+
+void saveHRZoneSettings() {
+    prefs.begin("hrzone", false);  // read-write
+    prefs.putBool("enabled", hrZoneEnabled);
+    prefs.putUShort("upper", hrZoneUpper);
+    prefs.putUShort("lower", hrZoneLower);
+    prefs.end();
+    Serial.printf("HR Zone: saved — %s, %u-%u bpm\n",
+                  hrZoneEnabled ? "ON" : "OFF", hrZoneLower, hrZoneUpper);
+}
+
+// ── HR Zone Settings Page ────────────────────────────────────
+
+void drawButton(int x, int y, int w, int h, const char* label, uint16_t bgColor) {
+    tft.fillRoundRect(x, y, w, h, 6, bgColor);
+    tft.drawRoundRect(x, y, w, h, 6, TFT_WHITE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(BUTTON_TEXT_COLOR, bgColor);
+    tft.drawString(label, x + w / 2, y + h / 2, 2);
+}
+
+void drawToggleButton() {
+    int y = 200;
+    if (hrZoneEnabled) {
+        drawButton(50, y, 140, 40, "ZONE ON", TOGGLE_ON_COLOR);
+    } else {
+        drawButton(50, y, 140, 40, "ZONE OFF", TOGGLE_OFF_COLOR);
+    }
+}
+
+void drawHRZoneValue(int centerX, int y, uint16_t value) {
+    // Clear value area
+    tft.fillRect(centerX - 50, y, 100, 30, BG_COLOR);
+    char buf[8];
+    sprintf(buf, "%u", value);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, BG_COLOR);
+    tft.drawString(buf, centerX, y + 8, 4);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(LABEL_COLOR, BG_COLOR);
+    tft.drawString("bpm", centerX + 30, y + 8, 2);
+}
+
+void drawHRZoneSettingsPage() {
+    tft.fillScreen(BG_COLOR);
+
+    // Title
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(HR_COLOR, BG_COLOR);
+    tft.drawString("HR ZONE SETTINGS", 120, 10, 2);
+
+    tft.drawFastHLine(10, 30, 220, DIVIDER_COLOR);
+
+    // Upper limit section
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(LABEL_COLOR, BG_COLOR);
+    tft.drawString("UPPER LIMIT", 120, 40, 2);
+
+    drawButton(20, 65, 50, 40, "-", BUTTON_COLOR);   // Upper minus
+    drawHRZoneValue(120, 65, hrZoneUpper);
+    drawButton(170, 65, 50, 40, "+", BUTTON_COLOR);   // Upper plus
+
+    tft.drawFastHLine(10, 115, 220, DIVIDER_COLOR);
+
+    // Lower limit section
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(LABEL_COLOR, BG_COLOR);
+    tft.drawString("LOWER LIMIT", 120, 125, 2);
+
+    drawButton(20, 150, 50, 40, "-", BUTTON_COLOR);   // Lower minus
+    drawHRZoneValue(120, 150, hrZoneLower);
+    drawButton(170, 150, 50, 40, "+", BUTTON_COLOR);   // Lower plus
+
+    tft.drawFastHLine(10, 195, 220, DIVIDER_COLOR);
+
+    // Toggle
+    drawToggleButton();
+
+    // Back button
+    drawButton(50, 258, 140, 40, "BACK", BUTTON_COLOR);
+}
+
+// Touch hit-test helpers
+bool inRect(int tx, int ty, int x, int y, int w, int h) {
+    return tx >= x && tx <= x + w && ty >= y && ty <= y + h;
+}
+
+void handleHRZoneTouch(int tx, int ty) {
+    bool changed = false;
+
+    // Upper minus (20, 65, 50, 40)
+    if (inRect(tx, ty, 20, 65, 50, 40)) {
+        if (hrZoneUpper - 5 >= hrZoneLower + 5) {
+            hrZoneUpper -= 5;
+            drawHRZoneValue(120, 65, hrZoneUpper);
+            changed = true;
+        }
+    }
+    // Upper plus (170, 65, 50, 40)
+    else if (inRect(tx, ty, 170, 65, 50, 40)) {
+        if (hrZoneUpper + 5 <= 220) {
+            hrZoneUpper += 5;
+            drawHRZoneValue(120, 65, hrZoneUpper);
+            changed = true;
+        }
+    }
+    // Lower minus (20, 150, 50, 40)
+    else if (inRect(tx, ty, 20, 150, 50, 40)) {
+        if (hrZoneLower - 5 >= 40) {
+            hrZoneLower -= 5;
+            drawHRZoneValue(120, 150, hrZoneLower);
+            changed = true;
+        }
+    }
+    // Lower plus (170, 150, 50, 40)
+    else if (inRect(tx, ty, 170, 150, 50, 40)) {
+        if (hrZoneLower + 5 <= hrZoneUpper - 5) {
+            hrZoneLower += 5;
+            drawHRZoneValue(120, 150, hrZoneLower);
+            changed = true;
+        }
+    }
+    // Toggle (50, 200, 140, 40)
+    else if (inRect(tx, ty, 50, 200, 140, 40)) {
+        hrZoneEnabled = !hrZoneEnabled;
+        drawToggleButton();
+        changed = true;
+    }
+    // Back (50, 258, 140, 40)
+    else if (inRect(tx, ty, 50, 258, 140, 40)) {
+        if (changed) saveHRZoneSettings();
+        switchToPage(PAGE_DASHBOARD);
+        return;
+    }
+
+    if (changed) saveHRZoneSettings();
+}
+
+void handleDashboardTouch(int tx, int ty) {
+    // HR block area: right column, between DIV2 and DIV3
+    // X: 120-240, Y: DIV2_Y(168) to DIV3_Y(246)
+    if (tx >= 120 && tx <= 240 && ty >= DIV2_Y && ty <= DIV3_Y) {
+        switchToPage(PAGE_HR_ZONE_SETTINGS);
+    }
+}
+
+void handleTouch(int tx, int ty) {
+    switch (currentPage) {
+        case PAGE_DASHBOARD:
+            handleDashboardTouch(tx, ty);
+            break;
+        case PAGE_HR_ZONE_SETTINGS:
+            handleHRZoneTouch(tx, ty);
+            break;
+    }
+}
+
+void switchToPage(PageState page) {
+    currentPage = page;
+    if (page == PAGE_DASHBOARD) {
+        // Reset dirty-region trackers so everything redraws
+        prevRpmInt = -1;
+        prevSpeedTenths = -1;
+        prevDistHundredths = -1;
+        prevTimeSec = -1;
+        prevHR = -1;
+        prevHRConnected = false;
+        prevTokensK = -1;
+        prevMsgs = -1;
+        prevDisplayState = SESSION_READY;
+        prevDisplayPulses = 0;
+        firstDraw = true;
+        drawStaticUI();
+        // Force immediate update of all dynamic values
+        updateRpmDisplay(smoothedRpm);
+        updateSpeedDisplay(currentSpeed);
+        updateDistDisplay(getDisplayDistance());
+        updateTimeDisplay(getActiveTimeMs(millis()));
+        updateHRDisplay(currentHR);
+        updateTokenDisplay();
+        updateStatusBar(sessionState, displayPulseCount);
+        updateBLEIndicator();
+        updateWiFiIndicator();
+        firstDraw = false;
+    } else if (page == PAGE_HR_ZONE_SETTINGS) {
+        drawHRZoneSettingsPage();
+    }
 }
 
 // ── Display Drawing ──────────────────────────────────────────
@@ -713,10 +1014,6 @@ void drawStaticUI() {
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TITLE_COLOR, BG_COLOR);
     tft.drawString("VIBE BIKE", 120, TITLE_Y, 2);
-
-    // RPM label
-    tft.setTextColor(LABEL_COLOR, BG_COLOR);
-    tft.drawString("RPM", 120, RPM_LABEL_Y, 2);
 
     // Divider 1
     tft.drawFastHLine(10, DIV1_Y, 220, DIVIDER_COLOR);
@@ -737,7 +1034,13 @@ void drawStaticUI() {
     // Time / HR labels and units
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("TIME", LEFT_COL, TIME_LABEL_Y, 2);
-    tft.drawString("HR", RIGHT_COL, HR_LABEL_Y, 2);
+    if (hrZoneEnabled) {
+        char zoneLabel[12];
+        sprintf(zoneLabel, "%u-%u", hrZoneLower, hrZoneUpper);
+        tft.drawString(zoneLabel, RIGHT_COL, HR_LABEL_Y, 2);
+    } else {
+        tft.drawString("HR", RIGHT_COL, HR_LABEL_Y, 2);
+    }
     tft.drawString("bpm", RIGHT_COL, HR_UNIT_Y, 2);
 
     // Vertical divider between time/HR
@@ -746,12 +1049,12 @@ void drawStaticUI() {
     // Divider 3
     tft.drawFastHLine(10, DIV3_Y, 220, DIVIDER_COLOR);
 
-    // Tokens / Cost labels
+    // Tokens / Messages labels
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("TOKENS", LEFT_COL, TOKEN_LABEL_Y, 2);
-    tft.drawString("COST", RIGHT_COL, COST_LABEL_Y, 2);
+    tft.drawString("MSGS", RIGHT_COL, MSGS_LABEL_Y, 2);
 
-    // Vertical divider between tokens/cost
+    // Vertical divider between tokens/msgs
     tft.drawFastVLine(120, DIV3_Y + 2, DIV4_Y - DIV3_Y - 4, DIVIDER_COLOR);
 
     // Divider 4
@@ -769,50 +1072,37 @@ void drawStaticUI() {
         tft.drawString("--", 234, TITLE_Y, 2);
     }
 
-    // WiFi indicator
+    // BLE heart icon (gray = not connected, red = connected)
+    drawHeartIcon(DIMMED_COLOR);
+
+    // WiFi icon (gray = not connected, green = connected)
     if (wifiEnabled) {
-        tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, BG_COLOR);
-        tft.drawString("W", 210, TITLE_Y, 2);
+        drawWiFiIcon(wifiConnected ? TFT_GREEN : DIMMED_COLOR);
     }
-
-    // BLE indicator
-    tft.setTextColor(DIMMED_COLOR, BG_COLOR);
-    tft.drawString("B", 196, TITLE_Y, 2);
-}
-
-void updateBLEIndicator() {
-    tft.setTextDatum(TR_DATUM);
-    if (hrConnected) {
-        tft.setTextColor(TFT_GREEN, BG_COLOR);
-    } else {
-        tft.setTextColor(DIMMED_COLOR, BG_COLOR);
-    }
-    tft.drawString("B", 196, TITLE_Y, 2);
-}
-
-void updateWiFiIndicator() {
-    if (!wifiEnabled) return;
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, BG_COLOR);
-    tft.drawString("W", 210, TITLE_Y, 2);
 }
 
 void updateRpmDisplay(float rpm) {
     int rpmInt = (int)(rpm + 0.5);
     if (rpmInt == prevRpmInt && !firstDraw) return;
 
-    // Clear previous value area (font 6)
-    int prevWidth = tft.textWidth("000", 6);
-    tft.fillRect(120 - prevWidth / 2, RPM_VALUE_Y, prevWidth, tft.fontHeight(6), BG_COLOR);
+    // Clear entire RPM row (value + label area)
+    tft.fillRect(0, RPM_VALUE_Y, 240, tft.fontHeight(6), BG_COLOR);
 
     prevRpmInt = rpmInt;
 
     char buf[8];
     sprintf(buf, "%d", rpmInt);
 
-    tft.setTextDatum(TC_DATUM);
+    // Draw RPM value right-aligned before center
+    tft.setTextDatum(TR_DATUM);
     tft.setTextColor(RPM_COLOR, BG_COLOR);
-    tft.drawString(buf, 120, RPM_VALUE_Y, 6);
+    tft.drawString(buf, 125, RPM_VALUE_Y, 6);
+
+    // Draw "RPM" label to the right, vertically centered with the number
+    int labelY = RPM_VALUE_Y + (tft.fontHeight(6) - tft.fontHeight(2)) / 2;
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(LABEL_COLOR, BG_COLOR);
+    tft.drawString("RPM", 130, labelY, 2);
 }
 
 void updateSpeedDisplay(float speed) {
@@ -871,11 +1161,55 @@ void updateHRDisplay(uint16_t hr) {
     int hrInt = (int)hr;
     bool conn = hrConnected;
 
-    if (hrInt == prevHR && conn == prevHRConnected && !firstDraw) return;
+    // Determine zone background color
+    uint16_t bgCol = BG_COLOR;
+    if (hrZoneEnabled && conn && hrInt > 0) {
+        if (hrInt >= hrZoneLower && hrInt <= hrZoneUpper) {
+            bgCol = HR_ZONE_IN_COLOR;  // Green — in zone
+        } else {
+            // Flash red when out of zone (toggle every 500ms)
+            unsigned long now = millis();
+            if (now - lastZoneFlashTime >= 500) {
+                lastZoneFlashTime = now;
+                hrZoneFlashState = !hrZoneFlashState;
+            }
+            bgCol = hrZoneFlashState ? HR_ZONE_OUT_COLOR : BG_COLOR;
+        }
+    }
+
+    // Check if zone flash state changed (forces redraw even if HR value unchanged)
+    static uint16_t prevBgCol = BG_COLOR;
+    if (hrInt == prevHR && conn == prevHRConnected && bgCol == prevBgCol && !firstDraw) return;
     prevHR = hrInt;
     prevHRConnected = conn;
+    prevBgCol = bgCol;
 
-    // Clear previous value
+    // Draw zone border around HR block (right half between DIV2 and DIV3)
+    int bx = 121, by = DIV2_Y + 1, bw = 118, bh = DIV3_Y - DIV2_Y - 2;
+    if (hrZoneEnabled && conn && hrInt > 0 && bgCol != BG_COLOR) {
+        // 2px colored border
+        tft.drawRect(bx, by, bw, bh, bgCol);
+        tft.drawRect(bx + 1, by + 1, bw - 2, bh - 2, bgCol);
+    } else {
+        // Clear border to black
+        tft.drawRect(bx, by, bw, bh, BG_COLOR);
+        tft.drawRect(bx + 1, by + 1, bw - 2, bh - 2, BG_COLOR);
+    }
+
+    // Redraw label and unit (always on black background)
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(LABEL_COLOR, BG_COLOR);
+    if (hrZoneEnabled) {
+        char zoneLabel[12];
+        sprintf(zoneLabel, "%u-%u", hrZoneLower, hrZoneUpper);
+        tft.drawString(zoneLabel, RIGHT_COL, HR_LABEL_Y, 2);
+    } else {
+        tft.drawString("HR", RIGHT_COL, HR_LABEL_Y, 2);
+    }
+    tft.drawString("bpm", RIGHT_COL, HR_UNIT_Y, 2);
+
+    // Draw HR value
+    // Clear previous value area
     int prevWidth = tft.textWidth("000", 4);
     tft.fillRect(RIGHT_COL - prevWidth / 2, HR_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
 
@@ -894,13 +1228,17 @@ void updateHRDisplay(uint16_t hr) {
 }
 
 void updateTokenDisplay() {
-    // Format tokens with K suffix
-    long tokensK = (long)(sessionTokensDelta / 1000);
-    int costCents = (int)(sessionCost * 100 + 0.5);
+    // Show delta during ride (tokens/msgs generated while pedaling)
+    // Before first pedal or after session ends, show 0
+    unsigned long displayTokens = initialStatsFetchDone ? sessionTokensDelta : 0;
+    unsigned long displayMsgs = initialStatsFetchDone ? sessionMsgsDelta : 0;
 
-    if (tokensK == prevTokensK && costCents == prevCostCents && !firstDraw) return;
+    long tokensK = (long)(displayTokens / 1000);
+    long msgs = (long)displayMsgs;
+
+    if (tokensK == prevTokensK && msgs == prevMsgs && !firstDraw) return;
     prevTokensK = tokensK;
-    prevCostCents = costCents;
+    prevMsgs = msgs;
 
     char buf[12];
 
@@ -908,44 +1246,44 @@ void updateTokenDisplay() {
     int prevWidth = tft.textWidth("999.9K", 4);
     tft.fillRect(LEFT_COL - prevWidth / 2, TOKEN_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
 
-    if (!tokenTrackingEnabled || !wifiConnected) {
+    if (!statsTrackingEnabled || !wifiConnected) {
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(DIMMED_COLOR, BG_COLOR);
         tft.drawString("--", LEFT_COL, TOKEN_VALUE_Y, 4);
-    } else if (!tokenDataValid) {
+    } else if (!statsDataValid) {
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(DIMMED_COLOR, BG_COLOR);
         tft.drawString("...", LEFT_COL, TOKEN_VALUE_Y, 4);
     } else {
-        if (sessionTokensDelta >= 1000000) {
-            sprintf(buf, "%.1fM", sessionTokensDelta / 1000000.0);
-        } else if (sessionTokensDelta >= 1000) {
-            sprintf(buf, "%.1fK", sessionTokensDelta / 1000.0);
+        if (displayTokens >= 1000000) {
+            sprintf(buf, "%.1fM", displayTokens / 1000000.0);
+        } else if (displayTokens >= 1000) {
+            sprintf(buf, "%.1fK", displayTokens / 1000.0);
         } else {
-            sprintf(buf, "%lu", sessionTokensDelta);
+            sprintf(buf, "%lu", displayTokens);
         }
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(TOKEN_COLOR, BG_COLOR);
         tft.drawString(buf, LEFT_COL, TOKEN_VALUE_Y, 4);
     }
 
-    // Clear cost value area
-    prevWidth = tft.textWidth("$99.99", 4);
-    tft.fillRect(RIGHT_COL - prevWidth / 2, COST_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
+    // Clear msgs value area
+    prevWidth = tft.textWidth("9999", 4);
+    tft.fillRect(RIGHT_COL - prevWidth / 2, MSGS_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
 
-    if (!tokenTrackingEnabled || !wifiConnected) {
+    if (!statsTrackingEnabled || !wifiConnected) {
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(DIMMED_COLOR, BG_COLOR);
-        tft.drawString("--", RIGHT_COL, COST_VALUE_Y, 4);
-    } else if (!tokenDataValid) {
+        tft.drawString("--", RIGHT_COL, MSGS_VALUE_Y, 4);
+    } else if (!statsDataValid) {
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(DIMMED_COLOR, BG_COLOR);
-        tft.drawString("...", RIGHT_COL, COST_VALUE_Y, 4);
+        tft.drawString("...", RIGHT_COL, MSGS_VALUE_Y, 4);
     } else {
-        sprintf(buf, "$%.2f", sessionCost);
+        sprintf(buf, "%lu", displayMsgs);
         tft.setTextDatum(TC_DATUM);
-        tft.setTextColor(COST_COLOR, BG_COLOR);
-        tft.drawString(buf, RIGHT_COL, COST_VALUE_Y, 4);
+        tft.setTextColor(MSGS_COLOR, BG_COLOR);
+        tft.drawString(buf, RIGHT_COL, MSGS_VALUE_Y, 4);
     }
 }
 
@@ -1006,8 +1344,8 @@ void updateSessionState(unsigned long now, unsigned long timeSinceLastPulse, boo
                 sumHR = 0;
                 hrSampleCount = 0;
                 sessionTokensDelta = 0;
-                sessionCost = 0;
-                initialTokenFetchDone = false;
+                sessionMsgsDelta = 0;
+                initialStatsFetchDone = false;
                 sessionLogged = false;
                 startSessionLog();
                 Serial.println("Session: READY -> ACTIVE");
@@ -1062,6 +1400,12 @@ void setup() {
     // BLE Heart Rate
     initBLE();
 
+    // Touch
+    initTouch();
+
+    // HR Zone settings (from NVS)
+    loadHRZoneSettings();
+
     drawStaticUI();
 
     // Sensor
@@ -1079,7 +1423,7 @@ void setup() {
     updateStatusBar(SESSION_READY, 0);
     firstDraw = false;
 
-    Serial.println("Vibe Bike Dashboard v2.0 — Ready (Phase 2+3)");
+    Serial.println("Vibe Bike Dashboard v2.1 — Ready (Phase 2+3 + HR Zones)");
     if (!sdReady) Serial.println("WARNING: SD card not available.");
 }
 
@@ -1163,8 +1507,14 @@ void loop() {
     // Handle WiFi (reconnection)
     handleWiFi();
 
-    // Handle token tracking (API polling)
-    handleTokenTracking(now);
+    // Handle stats tracking (local server polling)
+    handleStatsTracking(now);
+
+    // Handle touch input
+    int tx, ty;
+    if (readTouch(&tx, &ty)) {
+        handleTouch(tx, ty);
+    }
 
     // Raw data logging to SD
     if (sdReady && (sessionState == SESSION_ACTIVE || sessionState == SESSION_PAUSED)) {
@@ -1174,8 +1524,8 @@ void loop() {
         }
     }
 
-    // Update display at fixed interval
-    if (now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
+    // Update display at fixed interval (only on dashboard page)
+    if (currentPage == PAGE_DASHBOARD && now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
         lastDisplayUpdate = now;
 
         updateRpmDisplay(smoothedRpm);

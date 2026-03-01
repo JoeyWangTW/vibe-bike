@@ -138,3 +138,46 @@
   - Partition scheme changed from default to `min_spiffs` (1.4MB / 1.9MB = 70%)
   - FQBN: `esp32:esp32:esp32:PartitionScheme=min_spiffs`
   - Total flash: 1390KB (70%), RAM: 60KB (18%)
+
+## 2026-02-25 - Hardware testing & BLE debugging
+
+- Uploaded firmware to board (460800 baud — 921600 causes chip crash)
+- **NimBLE doesn't work on this board** — scan returns 0 devices, direct connect crashes
+- Tested with built-in ESP32 BLE library — found 42+ devices including HR strap
+- HR strap identified: "808S 0023713" at `de:5c:38:c5:83:1d`
+- Rewrote test sketch and dashboard to use built-in ESP32 BLE (not NimBLE)
+- Successfully receiving HR data: 89, 90, etc. bpm via BLE notifications
+- Fixed RPM display: "RPM" label moved to right of number instead of below (per user feedback)
+- Created `config.h` / `config.example.h` for WiFi/API credentials (gitignored)
+- Created `.gitignore` for config.h, build artifacts, .DS_Store
+- Created `scripts/test_api_key.sh` to verify Anthropic Admin API key
+
+## 2026-02-27 - Pivot from Admin API to local stats server
+
+- Discovered Admin API tracks API billing, not Claude Max subscription usage
+- Found `~/.claude/stats-cache.json` contains local Claude Code usage stats (tokens, messages, sessions)
+- Created `scripts/stats_server.py` — Python HTTP server that reads stats-cache.json and serves today's data
+- Replaced Anthropic Admin API integration in firmware with local HTTP stats polling
+- Removed `WiFiClientSecure` (HTTPS) — only need plain HTTP for local server, saves flash
+- Changed display: TOKENS + MSGS (instead of TOKENS + COST, since Max has no per-token cost)
+- Updated config.h: `STATS_SERVER_IP` + `STATS_SERVER_PORT` instead of `ANTHROPIC_ADMIN_KEY`
+- Flash: 1855KB (94% of min_spiffs) — compiles successfully
+- Updated CLAUDE.md, docs/status.md with BLE library switch and stats server approach
+
+## 2026-03-01 - HR Zone feature (touch-enabled settings)
+
+- Added touchscreen support using **XPT2046_Bitbang** library (software SPI, separate from display/SD buses)
+  - Touch pins: MOSI=IO32, MISO=IO39, CLK=IO25, CS=IO33, IRQ=IO36
+  - IRQ pin used for touch detection (LOW = touched), 300ms debounce
+- Added page system: `PAGE_DASHBOARD` / `PAGE_HR_ZONE_SETTINGS`
+  - Tap HR block on dashboard (right half, time/HR row) → opens settings page
+  - Settings page: upper/lower limit +/- buttons (5 bpm steps), toggle on/off, back button
+  - Limits: upper up to 220, lower down to 40, must maintain 5 bpm gap
+- HR zone indicator on dashboard:
+  - Green background on HR block when heart rate is in zone
+  - Flashing red background when out of zone (500ms toggle)
+  - HR label shows "120-160" range instead of "HR" when zone enabled
+- NVS persistence via ESP32 Preferences library — zone settings survive reboots
+- Created `firmware/test_touch/test_touch.ino` — standalone touch calibration/test sketch
+- Flash: 1892KB (96% of min_spiffs) — ~6KB added, 74KB headroom remaining
+- Test sketch: 358KB (27% of default partition)
