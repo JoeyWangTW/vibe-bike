@@ -1,7 +1,7 @@
 {
   "project": "Vibe Bike",
   "branchName": "phase-1-bike-data",
-  "description": "Phase 1 MVP: Read cadence/speed data from the indoor bike's reed switch (2-pin connector, 1 pulse/rev) via IO35 and display it on the ESP32 2.8\" ILI9341 screen. Wiring: reed switch → IO35 (10K pull-up to 3.3V) + GND. The ESP32-32E display board is both the microcontroller and the screen.",
+  "description": "Smart indoor bike dashboard on ESP32 2.8\" ILI9341 display. Tracks cadence, speed, distance, BLE heart rate, Claude Code token spend, and HR zones — all on one screen. Reed switch sensor on IO35, Coospo H808S BLE HR strap, WiFi stats via local server, touchscreen HR zone settings.",
   "userStories": [
     {
       "id": "VB-001",
@@ -49,7 +49,7 @@
       "priority": "critical",
       "type": "hardware",
       "passes": true,
-      "notes": "Wiring: reed switch wire 1 → IO35, wire 2 → GND, 10K pull-up from IO35 to 3.3V. Hardware assumed working."
+      "notes": "Wiring: reed switch wire 1 → IO35, wire 2 → GND, 10K pull-up from IO35 to 3.3V."
     },
     {
       "id": "VB-004",
@@ -66,7 +66,7 @@
       "priority": "critical",
       "type": "firmware",
       "passes": true,
-      "notes": "Interrupt-driven pulse counter on IO35 with 50ms debounce, 3s timeout for stopped detection, RPM clamping (10-200), and 4-sample rolling average smoothing. Serial output at 2Hz. Sketch: firmware/pulse_counter/pulse_counter.ino"
+      "notes": "Interrupt-driven pulse counter on IO35 with 50ms debounce, 3s timeout, RPM clamping (10-200), 4-sample rolling average."
     },
     {
       "id": "VB-005",
@@ -82,23 +82,23 @@
       "priority": "high",
       "type": "firmware",
       "passes": true,
-      "notes": "Speed from RPM via configurable DISTANCE_PER_REV_M (default 6.3m, ~3:1 flywheel ratio × 2.1m circumference). Distance accumulated per pulse. Configurable metric/imperial via USE_METRIC. Serial output shows RPM, speed, distance, and pulse count at 2Hz."
+      "notes": "Speed from RPM via DISTANCE_PER_REV_M (6.3m). Configurable metric/imperial."
     },
     {
       "id": "VB-006",
       "title": "Set up Arduino CLI project and display Hello World",
       "story": "As a developer, I want a working arduino-cli build setup so firmware compiles and uploads to the ESP32-32E display board.",
       "acceptance": [
-        "Arduino sketch in firmware/<name>/<name>.ino compiles with arduino-cli",
-        "TFT_eSPI configured for ILI9341 with correct SPI pin mapping for this board",
-        "Compiles and uploads to the ESP32-32E display board via /dev/cu.usbmodem2101",
+        "Arduino sketch compiles with arduino-cli",
+        "TFT_eSPI configured for ILI9341 with correct SPI pin mapping",
+        "Uploads to the ESP32-32E display board",
         "Basic 'Hello World' renders on the 2.8\" screen"
       ],
       "phase": 1,
       "priority": "high",
       "type": "firmware",
       "passes": true,
-      "notes": "TFT_eSPI User_Setup.h configured for ESP32-32E (ILI9341_2_DRIVER, HSPI, pins: CS=15, DC=2, SCLK=14, MOSI=13, MISO=12, BL=21). Hello world sketch at firmware/hello_world/hello_world.ino compiles cleanly (330KB flash, 22KB RAM)."
+      "notes": "TFT_eSPI configured for ESP32-32E (ILI9341_2_DRIVER, HSPI). Upload at 460800 baud (921600 fails)."
     },
     {
       "id": "VB-007",
@@ -115,7 +115,7 @@
       "priority": "high",
       "type": "firmware",
       "passes": true,
-      "notes": "Dashboard at firmware/bike_dashboard/bike_dashboard.ino. Portrait 240x320 layout: RPM (huge font 7), speed+distance (two columns, font 4), elapsed time (font 6), status bar. Dirty-region updates at 2Hz — only redraws changed values. Color-coded: cyan RPM, green speed, yellow distance, orange time. 334KB flash (25%), 23KB RAM (7%)."
+      "notes": "Compact portrait layout: RPM (font 6), speed/dist, time/HR, tokens/msgs, status bar. Dirty-region updates at 2Hz."
     },
     {
       "id": "VB-008",
@@ -132,7 +132,7 @@
       "priority": "medium",
       "type": "firmware",
       "passes": true,
-      "notes": "Session state machine: READY → ACTIVE (first pulse) → PAUSED (30s no pulses) → ENDED (2 min no pulses). PAUSED → ACTIVE on resume. Active time accumulated across intervals (excludes paused time). Color-coded status: green PEDALING, yellow PAUSED, red ENDED, grey READY. 335KB flash (25%), 23KB RAM (7%)."
+      "notes": "State machine: READY → ACTIVE → PAUSED → ENDED. Color-coded status bar."
     },
     {
       "id": "VB-009",
@@ -140,16 +140,158 @@
       "story": "As a rider, I want my session data saved to the SD card so I can review past rides and track progress over time.",
       "acceptance": [
         "Session summary written to SD card as CSV on session end",
-        "Fields: date, start_time, duration, distance, avg_rpm, max_rpm, avg_speed, max_speed",
-        "Raw data log option: timestamped RPM readings (for future analysis)",
-        "File naming: YYYY-MM-DD_HH-MM.csv",
+        "Raw data logged every 1s during session",
+        "Summary includes duration, distance, avg/max RPM, avg/max speed",
         "Graceful handling if SD card is missing or full"
       ],
       "phase": 1,
       "priority": "medium",
       "type": "firmware",
       "passes": true,
-      "notes": "SD card on VSPI (CS=IO5). Raw data logged every 1s (elapsed, rpm, speed, distance, pulses). Summary written on session end with duration, distance, avg/max RPM, avg/max speed, total revolutions. Files: session_NNNN.csv (raw + summary), summary_NNNN.csv (parseable). Auto-increments session number. Graceful degradation if SD missing. Note: filenames use sequential numbering (not YYYY-MM-DD) since no RTC/WiFi yet — real timestamps come in Phase 3. 381KB flash (29%), 23KB RAM (7%)."
+      "notes": "SD on VSPI (CS=IO5). Files: session_NNNN.csv (raw + summary), summary_NNNN.csv. Auto-incrementing session numbers."
+    },
+    {
+      "id": "VB-010",
+      "title": "BLE heart rate test sketch",
+      "story": "As a builder, I want a standalone BLE test sketch to verify communication with the Coospo H808S chest strap before integrating into the dashboard.",
+      "acceptance": [
+        "Scan for BLE devices advertising HR Service (0x180D)",
+        "Connect to HR strap and subscribe to notifications",
+        "Print BPM to serial output",
+        "Auto-reconnect on disconnect"
+      ],
+      "phase": 2,
+      "priority": "critical",
+      "type": "firmware",
+      "passes": true,
+      "notes": "NimBLE didn't work on this board (scan returns 0 devices). Switched to built-in ESP32 BLE. HR strap: '808S 0023713' at de:5c:38:c5:83:1d."
+    },
+    {
+      "id": "VB-011",
+      "title": "Integrate BLE HR into dashboard",
+      "story": "As a rider, I want to see my heart rate on the dashboard from my BLE chest strap so I can monitor intensity while riding.",
+      "acceptance": [
+        "BLE scan and connect runs in background",
+        "HR value updates on dashboard in real-time",
+        "Heart icon indicator shows connection status",
+        "Auto-reconnect on disconnect"
+      ],
+      "phase": 2,
+      "priority": "critical",
+      "type": "firmware",
+      "passes": true,
+      "notes": "Built-in ESP32 BLE client. Notification callback updates volatile currentHR. Heart icon: red=connected, gray=disconnected."
+    },
+    {
+      "id": "VB-012",
+      "title": "Compact all-in-one display layout",
+      "story": "As a rider, I want all metrics (RPM, speed, distance, time, HR, tokens) visible on one screen without scrolling.",
+      "acceptance": [
+        "RPM, speed/distance, time/HR, tokens/msgs all fit on 240x320",
+        "Each metric is color-coded and readable",
+        "Status indicators for SD, BLE, WiFi in title bar"
+      ],
+      "phase": 2,
+      "priority": "high",
+      "type": "firmware",
+      "passes": true,
+      "notes": "RPM (font 6, cyan), speed/dist (font 4, green/yellow), time/HR (font 4, orange/red), tokens/msgs (font 4, magenta/cyan), status bar with rev count."
+    },
+    {
+      "id": "VB-013",
+      "title": "Add HR to SD card logging",
+      "story": "As a rider, I want heart rate included in my session logs so I can analyze cardio data alongside ride metrics.",
+      "acceptance": [
+        "heart_rate column in raw CSV data",
+        "avg_hr, max_hr, min_hr in session summary",
+        "HR=0 when strap not connected (doesn't skip logging)"
+      ],
+      "phase": 2,
+      "priority": "medium",
+      "type": "firmware",
+      "passes": true,
+      "notes": "Raw: elapsed_sec,rpm,speed,distance,heart_rate,pulses. Summary: avg/max/min HR fields."
+    },
+    {
+      "id": "VB-014",
+      "title": "WiFi setup with auto-reconnect",
+      "story": "As a rider, I want the ESP32 to connect to WiFi so it can fetch Claude Code stats from my Mac.",
+      "acceptance": [
+        "Connects to configured SSID at boot",
+        "Auto-reconnects if connection drops",
+        "WiFi icon on display shows connection status",
+        "Optional — dashboard works without WiFi"
+      ],
+      "phase": 3,
+      "priority": "high",
+      "type": "firmware",
+      "passes": true,
+      "notes": "WiFi STA mode, 10s timeout at boot, 30s reconnect interval. Green/gray WiFi icon in title bar. Credentials in config.h (gitignored)."
+    },
+    {
+      "id": "VB-015",
+      "title": "Local stats server for Claude Code usage",
+      "story": "As a builder, I want a local HTTP server on my Mac that serves Claude Code usage stats so the ESP32 can fetch them over WiFi.",
+      "acceptance": [
+        "Python script reads ~/.claude/stats-cache.json",
+        "Serves today's tokens and messages on HTTP port 8888",
+        "ESP32 polls /stats endpoint every 30 seconds"
+      ],
+      "phase": 3,
+      "priority": "high",
+      "type": "script",
+      "passes": true,
+      "notes": "scripts/stats_server.py. Reads stats-cache.json, serves JSON with outputTokens and messages. Pivoted from Anthropic Admin API (tracks billing, not Max subscription)."
+    },
+    {
+      "id": "VB-016",
+      "title": "Display Claude Code stats on dashboard",
+      "story": "As a rider, I want to see how many tokens and messages Claude Code generated while I was pedaling.",
+      "acceptance": [
+        "Session token delta with K/M suffix (e.g., '45.2K')",
+        "Message count during session",
+        "Grayed out when WiFi disconnected, '...' while loading"
+      ],
+      "phase": 3,
+      "priority": "medium",
+      "type": "firmware",
+      "passes": true,
+      "notes": "Baseline recorded on first pedal. Delta updated every 30s poll. Tokens/msgs row below time/HR."
+    },
+    {
+      "id": "VB-017",
+      "title": "Combined session logging with stats",
+      "story": "As a rider, I want tokens and messages logged in my session summaries so I can see coding productivity alongside fitness data.",
+      "acceptance": [
+        "tokens_during_ride and msgs_during_ride in session summary CSV",
+        "Only logged when stats tracking is active"
+      ],
+      "phase": 3,
+      "priority": "medium",
+      "type": "firmware",
+      "passes": true,
+      "notes": "Added to both session_NNNN.csv summary block and summary_NNNN.csv."
+    },
+    {
+      "id": "VB-018",
+      "title": "Touchscreen HR zone settings",
+      "story": "As a rider, I want to set a target heart rate zone on the touchscreen so I can see at a glance whether I'm training at the right intensity.",
+      "acceptance": [
+        "Tap HR block on dashboard opens settings page",
+        "Settings page with +/- buttons for upper and lower limits (5 bpm steps)",
+        "On/off toggle for zone indicator",
+        "Back button returns to dashboard",
+        "Limits: upper up to 220, lower down to 40, minimum 5 bpm gap",
+        "Settings persist across reboots (ESP32 NVS)",
+        "Zone indicator: green border when in zone, flashing red border when out",
+        "HR label shows zone range (e.g., '120-160') when enabled",
+        "HR zone range logged to SD card session summary"
+      ],
+      "phase": 4,
+      "priority": "high",
+      "type": "firmware",
+      "passes": true,
+      "notes": "XPT2046 touch via raw bit-bang SPI (MOSI=32, MISO=39, CLK=25, CS=33, IRQ=36). Interrupt-protected reads to avoid BLE/WiFi corruption. X axis inverted on this panel. Calibration: rawX 1770→0, 185→240, rawY 150→0, 1840→320. Preferences library for NVS. Dropped XPT2046_Bitbang library (SPIFFS calibration unreliable) in favor of direct SPI. Flash: 1866KB (94% of min_spiffs)."
     }
   ]
 }

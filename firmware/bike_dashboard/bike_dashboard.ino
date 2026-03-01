@@ -666,6 +666,10 @@ void writeSessionSummary() {
     f.printf("# avg_hr,%.0f\n", avgHR);
     f.printf("# max_hr,%u\n", maxHR);
     f.printf("# min_hr,%u\n", minHR);
+    if (hrZoneEnabled) {
+        f.printf("# hr_zone_lower,%u\n", hrZoneLower);
+        f.printf("# hr_zone_upper,%u\n", hrZoneUpper);
+    }
     if (statsDataValid && initialStatsFetchDone) {
         f.printf("# tokens_during_ride,%lu\n", sessionTokensDelta);
         f.printf("# msgs_during_ride,%lu\n", sessionMsgsDelta);
@@ -688,6 +692,10 @@ void writeSessionSummary() {
         sf.printf("avg_hr,bpm,%.0f\n", avgHR);
         sf.printf("max_hr,bpm,%u\n", maxHR);
         sf.printf("min_hr,bpm,%u\n", minHR);
+        if (hrZoneEnabled) {
+            sf.printf("hr_zone_lower,bpm,%u\n", hrZoneLower);
+            sf.printf("hr_zone_upper,bpm,%u\n", hrZoneUpper);
+        }
         if (statsDataValid && initialStatsFetchDone) {
             sf.printf("tokens_during_ride,count,%lu\n", sessionTokensDelta);
             sf.printf("msgs_during_ride,count,%lu\n", sessionMsgsDelta);
