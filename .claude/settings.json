@@ -1,0 +1,10 @@
+{
+  "allowedCommands": [
+    "arduino-cli compile",
+    "arduino-cli upload",
+    "arduino-cli monitor",
+    "arduino-cli lib install",
+    "arduino-cli lib list",
+    "arduino-cli board list"
+  ]
+}

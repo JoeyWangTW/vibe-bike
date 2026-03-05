@@ -1,0 +1,10 @@
+# Secrets — never commit credentials
+firmware/bike_dashboard/config.h
+
+# Arduino build artifacts
+build/
+*.elf
+*.bin
+
+# macOS
+.DS_Store

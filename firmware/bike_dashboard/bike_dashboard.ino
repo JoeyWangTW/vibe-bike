@@ -59,6 +59,16 @@
 #define TFT_BL_PIN        21
 #define DISPLAY_UPDATE_MS 500
 
+// ── Power Saving Configuration ───────────────────────────────
+#define BOOT_BUTTON_PIN   0       // GPIO0 = physical BOOT button on board
+#define BATTERY_ADC_PIN   34      // GPIO34 = battery voltage ADC (input-only)
+#define SCREEN_DIM_MS     60000   // 60s inactivity → backlight off
+#define SCREEN_SLEEP_MS   300000  // 5 min inactivity → ILI9341 sleep mode
+#define BATT_READ_MS      30000   // Read battery every 30s
+#define BATT_LOW_V        3.3     // Low battery threshold
+#define BATT_CRITICAL_V   3.1     // Critical threshold
+#define BATT_ADC_MULT     2.0     // Voltage divider ratio (calibrate after test)
+
 // ── SD Card Configuration ────────────────────────────────────
 #define SD_CS_PIN         5
 #define RAW_LOG_INTERVAL_MS  1000
@@ -282,6 +292,18 @@ long prevMsgs = -1;
 SessionState prevDisplayState = SESSION_READY;
 unsigned long prevDisplayPulses = 0;
 bool firstDraw = true;
+
+// ── Power Saving State ──────────────────────────────────────
+bool screenOn = true;
+bool displaySleeping = false;
+unsigned long lastActivityTime = 0;
+unsigned long lastBootButtonTime = 0;
+float batteryVoltage = 0;
+bool batteryLow = false;
+bool batteryCritical = false;
+bool batteryAvailable = false;
+unsigned long lastBattReadTime = 0;
+int prevBattIcon = -1;  // dirty-region tracker: -1=not drawn, 0=hidden, 1=low, 2=critical
 
 // ── Helpers ──────────────────────────────────────────────────
 float rpmToSpeed(float rpm) {
@@ -706,6 +728,155 @@ void writeSessionSummary() {
 
     Serial.printf("SD: Session %d saved. Duration: %lus, Dist: %.2f %s, Avg RPM: %.1f, Avg HR: %.0f\n",
                   sessionNumber, durationSec, dist, distUnit(), avgRpm, avgHR);
+}
+
+// ── Power Saving Functions ────────────────────────────────────
+
+void screenWake() {
+    if (!screenOn || displaySleeping) {
+        if (displaySleeping) {
+            tft.writecommand(0x11);  // SLPOUT
+            delay(120);
+            tft.writecommand(0x29);  // DISPON
+            displaySleeping = false;
+        }
+        digitalWrite(TFT_BL_PIN, HIGH);
+        screenOn = true;
+
+        // Force full redraw
+        prevRpmInt = -1;
+        prevSpeedTenths = -1;
+        prevDistHundredths = -1;
+        prevTimeSec = -1;
+        prevHR = -1;
+        prevHRConnected = false;
+        prevTokensK = -1;
+        prevMsgs = -1;
+        prevDisplayState = SESSION_READY;
+        prevDisplayPulses = 0;
+        prevBattIcon = -1;
+        firstDraw = true;
+        if (currentPage == PAGE_DASHBOARD) {
+            drawStaticUI();
+            updateRpmDisplay(smoothedRpm);
+            updateSpeedDisplay(currentSpeed);
+            updateDistDisplay(getDisplayDistance());
+            updateTimeDisplay(getActiveTimeMs(millis()));
+            updateHRDisplay(currentHR);
+            updateTokenDisplay();
+            updateStatusBar(sessionState, displayPulseCount);
+            updateBLEIndicator();
+            updateWiFiIndicator();
+            drawBatteryIcon();
+        } else if (currentPage == PAGE_HR_ZONE_SETTINGS) {
+            drawHRZoneSettingsPage();
+        }
+        firstDraw = false;
+        Serial.println("Power: Screen wake");
+    }
+}
+
+void screenSleep(bool deep) {
+    if (!screenOn && !deep) return;
+    if (displaySleeping && deep) return;
+
+    digitalWrite(TFT_BL_PIN, LOW);
+    screenOn = false;
+
+    if (deep && !displaySleeping) {
+        tft.writecommand(0x28);  // DISPOFF
+        tft.writecommand(0x10);  // SLPIN
+        displaySleeping = true;
+        Serial.println("Power: Display sleep (deep)");
+    } else if (!deep) {
+        Serial.println("Power: Backlight off");
+    }
+}
+
+void updateActivity() {
+    lastActivityTime = millis();
+    if (!screenOn || displaySleeping) screenWake();
+}
+
+void readBatteryVoltage() {
+    long sum = 0;
+    for (int i = 0; i < 8; i++) {
+        sum += analogRead(BATTERY_ADC_PIN);
+    }
+    float rawV = (sum / 8.0) / 4095.0 * 3.3;
+    float voltage = rawV * BATT_ADC_MULT;
+
+    // If voltage is nonsensical, no battery connected (USB-only)
+    if (voltage < 1.0 || voltage > 4.5) {
+        batteryAvailable = false;
+        batteryLow = false;
+        batteryCritical = false;
+        return;
+    }
+
+    batteryAvailable = true;
+    batteryVoltage = voltage;
+    batteryLow = (voltage <= BATT_LOW_V);
+    batteryCritical = (voltage <= BATT_CRITICAL_V);
+    Serial.printf("Battery: %.2fV %s\n", voltage,
+                  batteryCritical ? "(CRITICAL)" : batteryLow ? "(LOW)" : "(OK)");
+}
+
+void drawBatteryIcon() {
+    if (!batteryAvailable) {
+        if (prevBattIcon != 0) {
+            tft.fillRect(2, 2, 20, 12, BG_COLOR);
+            prevBattIcon = 0;
+        }
+        return;
+    }
+
+    int newState = batteryCritical ? 2 : (batteryLow ? 1 : 0);
+    if (newState == prevBattIcon) return;
+    prevBattIcon = newState;
+
+    if (!batteryLow && !batteryCritical) {
+        tft.fillRect(2, 2, 20, 12, BG_COLOR);
+        return;
+    }
+
+    uint16_t color = batteryCritical ? TFT_RED : TFT_YELLOW;
+
+    // Battery outline: 16x10 body + 2x4 nub
+    tft.drawRect(2, 4, 16, 10, color);
+    tft.fillRect(18, 7, 2, 4, color);
+
+    // Fill level
+    int fillW = batteryCritical ? 3 : 7;
+    tft.fillRect(4, 6, fillW, 6, color);
+    // Clear rest of interior
+    if (fillW < 12) {
+        tft.fillRect(4 + fillW, 6, 12 - fillW, 6, BG_COLOR);
+    }
+}
+
+void handlePowerSaving(unsigned long now) {
+    // Check BOOT button (GPIO0, active LOW, 300ms debounce)
+    if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+        if (now - lastBootButtonTime > 300) {
+            lastBootButtonTime = now;
+            updateActivity();
+        }
+    }
+
+    // Screen power management (use fresh millis() since lastActivityTime may be updated mid-loop)
+    unsigned long idleTime = millis() - lastActivityTime;
+    if (!displaySleeping && idleTime > SCREEN_SLEEP_MS) {
+        screenSleep(true);
+    } else if (screenOn && idleTime > SCREEN_DIM_MS) {
+        screenSleep(false);
+    }
+
+    // Battery reading at interval
+    if (now - lastBattReadTime >= BATT_READ_MS) {
+        lastBattReadTime = now;
+        readBatteryVoltage();
+    }
 }
 
 // ── Icon Drawing ──────────────────────────────────────────────
@@ -1395,6 +1566,13 @@ void setup() {
     pinMode(TFT_BL_PIN, OUTPUT);
     digitalWrite(TFT_BL_PIN, HIGH);
 
+    // BOOT button for screen wake
+    pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+    // Battery ADC
+    analogSetAttenuation(ADC_11db);
+    pinMode(BATTERY_ADC_PIN, INPUT);
+
     // Display
     tft.init();
     tft.setRotation(0);
@@ -1431,7 +1609,11 @@ void setup() {
     updateStatusBar(SESSION_READY, 0);
     firstDraw = false;
 
-    Serial.println("Vibe Bike Dashboard v2.1 — Ready (Phase 2+3 + HR Zones)");
+    // Power saving init
+    lastActivityTime = millis();
+    readBatteryVoltage();
+
+    Serial.println("Vibe Bike Dashboard v2.2 — Ready (Phase 2+3 + HR Zones + Power Saving)");
     if (!sdReady) Serial.println("WARNING: SD card not available.");
 }
 
@@ -1444,6 +1626,7 @@ void loop() {
     if (newPulse) {
         newPulse = false;
         gotPulse = true;
+        updateActivity();
 
         noInterrupts();
         unsigned long interval = pulseInterval;
@@ -1521,7 +1704,13 @@ void loop() {
     // Handle touch input
     int tx, ty;
     if (readTouch(&tx, &ty)) {
-        handleTouch(tx, ty);
+        if (!screenOn || displaySleeping) {
+            updateActivity();  // First touch only wakes, no UI action
+            lastTouchTime = millis() + 500;  // Suppress next touch to prevent accidental UI action
+        } else {
+            updateActivity();
+            handleTouch(tx, ty);
+        }
     }
 
     // Raw data logging to SD
@@ -1532,8 +1721,11 @@ void loop() {
         }
     }
 
-    // Update display at fixed interval (only on dashboard page)
-    if (currentPage == PAGE_DASHBOARD && now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
+    // Power saving (screen dim/sleep, battery, BOOT button)
+    handlePowerSaving(now);
+
+    // Update display at fixed interval (only on dashboard page, only when screen on)
+    if (screenOn && currentPage == PAGE_DASHBOARD && now - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
         lastDisplayUpdate = now;
 
         updateRpmDisplay(smoothedRpm);
@@ -1545,5 +1737,6 @@ void loop() {
         updateStatusBar(sessionState, displayPulseCount);
         updateBLEIndicator();
         updateWiFiIndicator();
+        drawBatteryIcon();
     }
 }

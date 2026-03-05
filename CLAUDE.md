@@ -21,34 +21,36 @@ A personal fitness-meets-vibe-coding dashboard. Turns a broken indoor bike into 
 
 ### Firmware
 - Use **arduino-cli** for builds (NOT PlatformIO)
-- FQBN: `esp32:esp32:esp32:PartitionScheme=min_spiffs` (ESP32 core 3.3.7, min_spiffs needed for BLE+WiFi+HTTPS)
+- FQBN: `esp32:esp32:esp32:PartitionScheme=min_spiffs` (ESP32 core 3.3.7, min_spiffs needed for BLE+WiFi)
 - USB port: `/dev/cu.usbserial-1120` (CH340, for upload) — `/dev/cu.usbmodem2101` is native USB (serial monitor only)
 - Display library: **TFT_eSPI** 2.5.43 (installed, needs User_Setup.h configured for ILI9341 SPI pins)
-- BLE library: **NimBLE-Arduino** 2.3.7 (lighter than Arduino BLE)
-- JSON library: **ArduinoJson** 7.4.2 (for API response parsing)
+- BLE library: **Built-in ESP32 BLE** (NOT NimBLE — NimBLE 2.3.7 doesn't work on this board, scan returns 0 devices)
+- JSON library: **ArduinoJson** 7.4.2 (for stats server response parsing)
 - Sketches go in `firmware/<sketch-name>/<sketch-name>.ino` (Arduino sketch format)
 - Test sketches in `firmware/test_<name>/test_<name>.ino`
 
 ### Build Commands
 ```bash
-# Compile (main dashboard — needs min_spiffs for BLE+WiFi+HTTPS)
+# Compile (main dashboard — needs min_spiffs for BLE+WiFi)
 arduino-cli compile -b esp32:esp32:esp32:PartitionScheme=min_spiffs firmware/bike_dashboard
 
 # Compile (test sketches — default partition is fine)
 arduino-cli compile -b esp32:esp32:esp32 firmware/test_<name>
 
-# Upload
-arduino-cli upload -b esp32:esp32:esp32:PartitionScheme=min_spiffs -p /dev/cu.usbmodem2101 firmware/bike_dashboard
+# Upload (CH340 port, 460800 baud — default 921600 fails on this board)
+arduino-cli upload -b esp32:esp32:esp32:PartitionScheme=min_spiffs,UploadSpeed=460800 -p /dev/cu.usbserial-1120 firmware/bike_dashboard
 
 # Serial monitor
-arduino-cli monitor -p /dev/cu.usbmodem2101 -c baudrate=115200
+arduino-cli monitor -p /dev/cu.usbserial-1120 -c baudrate=115200
 
 # Install a library
 arduino-cli lib install "<library-name>"
 ```
 
-### Important: Upload may require BOOT button
-If upload fails with "Failed to connect to ESP32", hold the BOOT button on the board during upload. The CYD shows up as `/dev/cu.usbmodem2101` (native USB).
+### Important: Upload notes
+- USB port: `/dev/cu.usbserial-1120` (CH340) — used for both upload and serial monitor
+- Upload speed: 460800 baud (default 921600 fails on this board, 115200 works but is slow)
+- If upload fails with "Failed to connect to ESP32", hold the BOOT button on the board during upload
 
 ### Pin Mapping (ESP32-32E Board)
 | Function | Pins |
@@ -62,20 +64,26 @@ If upload fails with "Failed to connect to ESP32", hold the BOOT button on the b
 | **Bike sensor** | **IO35 (input-only, 10K pull-up to 3.3V)** |
 | Available | IO27 |
 
-### WiFi & API Configuration
-- WiFi credentials: set `WIFI_SSID` and `WIFI_PASSWORD` in `bike_dashboard.ino` (or leave empty to skip WiFi)
-- Anthropic Admin API key: set `ANTHROPIC_ADMIN_KEY` in `bike_dashboard.ino` (get from console.anthropic.com > Settings > Admin API Keys)
-- Token tracking is optional — dashboard works without WiFi/API key
+### WiFi & Stats Configuration
+- Credentials live in `firmware/bike_dashboard/config.h` (gitignored, never committed)
+- To set up: `cp firmware/bike_dashboard/config.example.h firmware/bike_dashboard/config.h` then edit `config.h`
+- Set `WIFI_SSID` and `WIFI_PASSWORD` for WiFi
+- Set `STATS_SERVER_IP` to your Mac's local IP (the stats server prints it on start)
+- Token tracking reads from `~/.claude/stats-cache.json` via a local HTTP bridge:
+  1. Run `python3 scripts/stats_server.py` on your Mac
+  2. It serves today's Claude Code usage (tokens, messages) on port 8888
+  3. The ESP32 polls `http://<mac-ip>:8888/stats` every 30 seconds
+- Stats tracking is optional — dashboard works without WiFi/stats server
 
 ### Data Format
 - Session logs: CSV on SD card, named `session_NNNN.csv` (auto-incrementing)
 - Raw data fields: `elapsed_sec,rpm,speed,distance,heart_rate,pulses`
-- Session summary includes: duration, distance, avg/max RPM, avg/max speed, avg/max/min HR, tokens_used, estimated_cost
+- Session summary includes: duration, distance, avg/max RPM, avg/max speed, avg/max/min HR, tokens_during_ride, msgs_during_ride
 
 ### Phases
 - **Phase 1 (complete):** Bike cadence/speed data on screen + SD logging
 - **Phase 2 (complete):** BLE heart rate from Coospo H808S chest strap
-- **Phase 3 (complete):** WiFi + Anthropic Usage API token tracking on display
+- **Phase 3 (complete):** WiFi + Claude Code stats tracking on display (via local stats server)
 
 ## Work Documentation
 

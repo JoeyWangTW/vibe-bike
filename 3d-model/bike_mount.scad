@@ -47,6 +47,7 @@ CORNER_R     = 4.0;     // outer corner radius
 
 // Corner brackets (in X-Y plane, extend along Z)
 BOARD_GAP    = 0.25;    // clearance between board edge and cavity wall (friction fit)
+CONN_EXTRA   = 2.0;     // extra right-side clearance for IO35 connector + wires
 BRACKET_W    = 3.0;     // bracket arm width (> BOARD_GAP so it overlaps under board)
 BRACKET_ARM  = 10.0;    // bracket arm length along wall
 
@@ -54,16 +55,16 @@ BRACKET_ARM  = 10.0;    // bracket arm length along wall
 //  COMPUTED
 // ================================================================
 
-inner_w    = BOARD_W + BOARD_GAP * 2;           // 50.5
+inner_w    = BOARD_W + BOARD_GAP * 2 + CONN_EXTRA; // 52.5 (extra on right for connector)
 inner_h    = BOARD_H + BOARD_GAP * 2;           // 86.5
 cavity_d   = BOARD_T + TOL + BATT_SPACE;        // 22.8
 
-frame_w    = inner_w + WALL * 2;                // 55.5
+frame_w    = inner_w + WALL * 2;                // 57.5
 frame_h    = inner_h + WALL * 2;                // 91.5
 frame_d    = cavity_d + BACK_WALL;              // 28.8
 
-// Board position (centered in cavity)
-board_x    = WALL + BOARD_GAP;                  // 2.75
+// Board position (shifted right in cavity, extra gap on left/low-X = screen-right for connector)
+board_x    = WALL + BOARD_GAP + CONN_EXTRA;     // 4.75
 board_y    = WALL + BOARD_GAP;                  // 2.75
 
 // Plate slot (centered X, in back wall)
@@ -137,8 +138,8 @@ module mount() {
         }
 
         // USB-C slot (cut LAST so it goes through wall + brackets)
-        // Full cavity depth in Z, generous height for cable clearance
-        translate([(frame_w - USB_W) / 2, -0.01, 0])
+        // Centered on board (not frame, since cavity is asymmetric)
+        translate([board_x + (BOARD_W - USB_W) / 2, -0.01, 0])
             cube([USB_W, board_y + 5, cavity_d]);
     }
 }

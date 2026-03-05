@@ -32,15 +32,16 @@ BOARD_W      = 50.0;
 BOARD_H      = 86.0;
 WALL         = 2.5;
 BOARD_GAP    = 0.25;
+CONN_EXTRA   = 2.0;     // extra right-side clearance (must match bike_mount.scad)
 CORNER_R     = 4.0;
 USB_W        = 14.0;
 
-inner_w      = BOARD_W + BOARD_GAP * 2;
+inner_w      = BOARD_W + BOARD_GAP * 2 + CONN_EXTRA;
 inner_h      = BOARD_H + BOARD_GAP * 2;
 frame_w      = inner_w + WALL * 2;           // 55.5
 frame_h      = inner_h + WALL * 2;           // 91.5
 
-board_x      = WALL + BOARD_GAP;             // 2.75
+board_x      = WALL + BOARD_GAP + CONN_EXTRA; // 4.75 (extra gap on low-X = screen-right for connector)
 board_y      = WALL + BOARD_GAP;             // 2.75
 
 // ================================================================
@@ -88,9 +89,9 @@ cut_h        = SCREEN_VA_H + SCREEN_M * 2;   // 59.05
 cut_x        = offset + screen_x - SCREEN_M; // 7.25
 cut_y        = offset + screen_y - SCREEN_M; // 18.025
 
-// USB cable clearance in bottom lip
+// USB cable clearance in bottom lip (centered on board, not frame)
 usb_cut_w    = USB_W + 2;
-usb_cut_x    = (cap_w - usb_cut_w) / 2;
+usb_cut_x    = offset + board_x + (BOARD_W - usb_cut_w) / 2;
 
 // ================================================================
 //  HELPERS
