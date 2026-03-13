@@ -124,28 +124,28 @@ enum PageState {
 #define RPM_VALUE_Y   28
 // Divider 1
 #define DIV1_Y        80
-// Speed / Distance row
-#define SPEED_LABEL_Y 94
-#define SPEED_VALUE_Y 112
-#define SPEED_UNIT_Y  148
-#define DIST_LABEL_Y  94
-#define DIST_VALUE_Y  112
-#define DIST_UNIT_Y   148
+// Speed / Distance row (block: 80–168, 88px)
+#define SPEED_LABEL_Y 82       // flush top: DIV1+2
+#define SPEED_VALUE_Y 111      // centered: 98+(52-26)/2
+#define SPEED_UNIT_Y  150      // flush bottom: DIV2-16-2
+#define DIST_LABEL_Y  82
+#define DIST_VALUE_Y  111
+#define DIST_UNIT_Y   150
 // Divider 2
 #define DIV2_Y        168
-// Time / HR row
-#define TIME_LABEL_Y  172
-#define TIME_VALUE_Y  190
-#define HR_LABEL_Y    172
-#define HR_VALUE_Y    190
-#define HR_UNIT_Y     226
+// Time / HR row (block: 168–246, 78px)
+#define TIME_LABEL_Y  170      // flush top: DIV2+2
+#define TIME_VALUE_Y  194      // centered: 186+(42-26)/2
+#define HR_LABEL_Y    170
+#define HR_VALUE_Y    194
+#define HR_UNIT_Y     228      // flush bottom: DIV3-16-2
 // Divider 3
 #define DIV3_Y        246
-// Tokens / Messages row
-#define TOKEN_LABEL_Y 250
-#define TOKEN_VALUE_Y 268
-#define MSGS_LABEL_Y  250
-#define MSGS_VALUE_Y  268
+// Tokens / Messages row (block: 246–294, 48px)
+#define TOKEN_LABEL_Y 248      // flush top: DIV3+2
+#define TOKEN_VALUE_Y 266      // centered: 264+(30-26)/2
+#define MSGS_LABEL_Y  248
+#define MSGS_VALUE_Y  266
 // Divider 4
 #define DIV4_Y        294
 // Status bar
@@ -270,13 +270,17 @@ unsigned long lastStatsPollTime = 0;
 
 // Stats from Claude Code (via local stats server)
 unsigned long sessionStartTokens = 0;
-unsigned long sessionStartMsgs = 0;
+unsigned long sessionStartUserMsgs = 0;
+unsigned long sessionStartAsstMsgs = 0;
 unsigned long latestTokens = 0;
-unsigned long latestMsgs = 0;
+unsigned long latestUserMsgs = 0;
+unsigned long latestAsstMsgs = 0;
 unsigned long sessionTokensDelta = 0;
-unsigned long sessionMsgsDelta = 0;
+unsigned long sessionUserMsgsDelta = 0;
+unsigned long sessionAsstMsgsDelta = 0;
 unsigned long todayTokens = 0;
-unsigned long todayMsgs = 0;
+unsigned long todayUserMsgs = 0;
+unsigned long todayAsstMsgs = 0;
 bool statsDataValid = false;
 bool initialStatsFetchDone = false;
 
@@ -288,7 +292,8 @@ int prevTimeSec = -1;
 int prevHR = -1;
 bool prevHRConnected = false;
 long prevTokensK = -1;
-long prevMsgs = -1;
+long prevUserMsgs = -1;
+long prevAsstMsgs = -1;
 SessionState prevDisplayState = SESSION_READY;
 unsigned long prevDisplayPulses = 0;
 bool firstDraw = true;
@@ -303,6 +308,7 @@ bool batteryLow = false;
 bool batteryCritical = false;
 bool batteryAvailable = false;
 unsigned long lastBattReadTime = 0;
+unsigned long lastBattReadDone = 0;  // suppress touch after ADC read
 int prevBattIcon = -1;  // dirty-region tracker: -1=not drawn, 0=hidden, 1=low, 2=critical
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -524,7 +530,7 @@ void handleWiFi() {
 
 // ── Claude Code Stats (via local HTTP server) ────────────────
 
-bool fetchStats(unsigned long* outTokens, unsigned long* outMsgs) {
+bool fetchStats(unsigned long* outTokens, unsigned long* outUserMsgs, unsigned long* outAsstMsgs) {
     if (!wifiConnected || !statsTrackingEnabled) return false;
 
     HTTPClient http;
@@ -546,7 +552,7 @@ bool fetchStats(unsigned long* outTokens, unsigned long* outMsgs) {
     String payload = http.getString();
     http.end();
 
-    // Parse JSON: {"date":"...","messages":N,"sessions":N,"toolCalls":N,"outputTokens":N}
+    // Parse JSON: {"date":"...","userMessages":N,"assistantMessages":N,"sessions":N,"toolCalls":N,"outputTokens":N}
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (err) {
@@ -555,9 +561,10 @@ bool fetchStats(unsigned long* outTokens, unsigned long* outMsgs) {
     }
 
     *outTokens = doc["outputTokens"] | 0UL;
-    *outMsgs = doc["messages"] | 0UL;
+    *outUserMsgs = doc["userMessages"] | 0UL;
+    *outAsstMsgs = doc["assistantMessages"] | 0UL;
 
-    Serial.printf("Stats: tokens=%lu msgs=%lu\n", *outTokens, *outMsgs);
+    Serial.printf("Stats: tokens=%lu userMsgs=%lu asstMsgs=%lu\n", *outTokens, *outUserMsgs, *outAsstMsgs);
     return true;
 }
 
@@ -568,27 +575,31 @@ void handleStatsTracking(unsigned long now) {
     if (now - lastStatsPollTime < STATS_POLL_INTERVAL_MS && lastStatsPollTime > 0) return;
     lastStatsPollTime = now;
 
-    unsigned long tokens, msgs;
-    if (!fetchStats(&tokens, &msgs)) return;
+    unsigned long tokens, userMsgs, asstMsgs;
+    if (!fetchStats(&tokens, &userMsgs, &asstMsgs)) return;
 
     latestTokens = tokens;
-    latestMsgs = msgs;
+    latestUserMsgs = userMsgs;
+    latestAsstMsgs = asstMsgs;
     todayTokens = tokens;
-    todayMsgs = msgs;
+    todayUserMsgs = userMsgs;
+    todayAsstMsgs = asstMsgs;
     statsDataValid = true;
 
     // On first fetch during a session, record baseline
     if (!initialStatsFetchDone && sessionState == SESSION_ACTIVE) {
         sessionStartTokens = tokens;
-        sessionStartMsgs = msgs;
+        sessionStartUserMsgs = userMsgs;
+        sessionStartAsstMsgs = asstMsgs;
         initialStatsFetchDone = true;
-        Serial.printf("Stats: Session baseline — tokens=%lu msgs=%lu\n", tokens, msgs);
+        Serial.printf("Stats: Session baseline — tokens=%lu userMsgs=%lu asstMsgs=%lu\n", tokens, userMsgs, asstMsgs);
     }
 
     // Calculate session delta
     if (initialStatsFetchDone) {
         sessionTokensDelta = latestTokens - sessionStartTokens;
-        sessionMsgsDelta = latestMsgs - sessionStartMsgs;
+        sessionUserMsgsDelta = latestUserMsgs - sessionStartUserMsgs;
+        sessionAsstMsgsDelta = latestAsstMsgs - sessionStartAsstMsgs;
     }
 }
 
@@ -694,7 +705,8 @@ void writeSessionSummary() {
     }
     if (statsDataValid && initialStatsFetchDone) {
         f.printf("# tokens_during_ride,%lu\n", sessionTokensDelta);
-        f.printf("# msgs_during_ride,%lu\n", sessionMsgsDelta);
+        f.printf("# user_msgs_during_ride,%lu\n", sessionUserMsgsDelta);
+        f.printf("# asst_msgs_during_ride,%lu\n", sessionAsstMsgsDelta);
     }
     f.close();
 
@@ -720,7 +732,8 @@ void writeSessionSummary() {
         }
         if (statsDataValid && initialStatsFetchDone) {
             sf.printf("tokens_during_ride,count,%lu\n", sessionTokensDelta);
-            sf.printf("msgs_during_ride,count,%lu\n", sessionMsgsDelta);
+            sf.printf("user_msgs_during_ride,count,%lu\n", sessionUserMsgsDelta);
+            sf.printf("asst_msgs_during_ride,count,%lu\n", sessionAsstMsgsDelta);
         }
         sf.close();
         Serial.printf("SD: Summary written to %s\n", summaryFile);
@@ -751,7 +764,8 @@ void screenWake() {
         prevHR = -1;
         prevHRConnected = false;
         prevTokensK = -1;
-        prevMsgs = -1;
+        prevUserMsgs = -1;
+        prevAsstMsgs = -1;
         prevDisplayState = SESSION_READY;
         prevDisplayPulses = 0;
         prevBattIcon = -1;
@@ -803,6 +817,7 @@ void readBatteryVoltage() {
     for (int i = 0; i < 8; i++) {
         sum += analogRead(BATTERY_ADC_PIN);
     }
+    lastBattReadDone = millis();  // mark time to suppress touch (ADC1 crosstalk with GPIO36)
     float rawV = (sum / 8.0) / 4095.0 * 3.3;
     float voltage = rawV * BATT_ADC_MULT;
 
@@ -1164,7 +1179,8 @@ void switchToPage(PageState page) {
         prevHR = -1;
         prevHRConnected = false;
         prevTokensK = -1;
-        prevMsgs = -1;
+        prevUserMsgs = -1;
+        prevAsstMsgs = -1;
         prevDisplayState = SESSION_READY;
         prevDisplayPulses = 0;
         firstDraw = true;
@@ -1231,7 +1247,7 @@ void drawStaticUI() {
     // Tokens / Messages labels
     tft.setTextColor(LABEL_COLOR, BG_COLOR);
     tft.drawString("TOKENS", LEFT_COL, TOKEN_LABEL_Y, 2);
-    tft.drawString("MSGS", RIGHT_COL, MSGS_LABEL_Y, 2);
+    tft.drawString("USR/AI", RIGHT_COL, MSGS_LABEL_Y, 2);
 
     // Vertical divider between tokens/msgs
     tft.drawFastVLine(120, DIV3_Y + 2, DIV4_Y - DIV3_Y - 4, DIVIDER_COLOR);
@@ -1304,15 +1320,20 @@ void updateSpeedDisplay(float speed) {
 void updateDistDisplay(float dist) {
     int distHundredths = (int)(dist * 100 + 0.5);
     if (distHundredths == prevDistHundredths && !firstDraw) return;
+
+    // Clear previous text region
+    int prevWidth = tft.textWidth("00.00", 4);
+    tft.fillRect(RIGHT_COL - prevWidth / 2, DIST_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
+
     prevDistHundredths = distHundredths;
 
     char buf[10];
     if (dist < 10.0) {
-        sprintf(buf, "%5.2f", dist);
+        sprintf(buf, "%.2f", dist);
     } else if (dist < 100.0) {
-        sprintf(buf, "%5.1f", dist);
+        sprintf(buf, "%.1f", dist);
     } else {
-        sprintf(buf, "%5.0f", dist);
+        sprintf(buf, "%.0f", dist);
     }
 
     tft.setTextDatum(TC_DATUM);
@@ -1410,16 +1431,19 @@ void updateTokenDisplay() {
     // Show delta during ride (tokens/msgs generated while pedaling)
     // Before first pedal or after session ends, show 0
     unsigned long displayTokens = initialStatsFetchDone ? sessionTokensDelta : 0;
-    unsigned long displayMsgs = initialStatsFetchDone ? sessionMsgsDelta : 0;
+    unsigned long displayUserMsgs = initialStatsFetchDone ? sessionUserMsgsDelta : 0;
+    unsigned long displayAsstMsgs = initialStatsFetchDone ? sessionAsstMsgsDelta : 0;
 
     long tokensK = (long)(displayTokens / 1000);
-    long msgs = (long)displayMsgs;
+    long uMsgs = (long)displayUserMsgs;
+    long aMsgs = (long)displayAsstMsgs;
 
-    if (tokensK == prevTokensK && msgs == prevMsgs && !firstDraw) return;
+    if (tokensK == prevTokensK && uMsgs == prevUserMsgs && aMsgs == prevAsstMsgs && !firstDraw) return;
     prevTokensK = tokensK;
-    prevMsgs = msgs;
+    prevUserMsgs = uMsgs;
+    prevAsstMsgs = aMsgs;
 
-    char buf[12];
+    char buf[16];
 
     // Clear token value area
     int prevWidth = tft.textWidth("999.9K", 4);
@@ -1446,8 +1470,8 @@ void updateTokenDisplay() {
         tft.drawString(buf, LEFT_COL, TOKEN_VALUE_Y, 4);
     }
 
-    // Clear msgs value area
-    prevWidth = tft.textWidth("9999", 4);
+    // Clear msgs value area — show "USR/AI" as e.g. "12/38"
+    prevWidth = tft.textWidth("999/999", 4);
     tft.fillRect(RIGHT_COL - prevWidth / 2, MSGS_VALUE_Y, prevWidth, tft.fontHeight(4), BG_COLOR);
 
     if (!statsTrackingEnabled || !wifiConnected) {
@@ -1459,7 +1483,7 @@ void updateTokenDisplay() {
         tft.setTextColor(DIMMED_COLOR, BG_COLOR);
         tft.drawString("...", RIGHT_COL, MSGS_VALUE_Y, 4);
     } else {
-        sprintf(buf, "%lu", displayMsgs);
+        sprintf(buf, "%lu/%lu", displayUserMsgs, displayAsstMsgs);
         tft.setTextDatum(TC_DATUM);
         tft.setTextColor(MSGS_COLOR, BG_COLOR);
         tft.drawString(buf, RIGHT_COL, MSGS_VALUE_Y, 4);
@@ -1523,7 +1547,8 @@ void updateSessionState(unsigned long now, unsigned long timeSinceLastPulse, boo
                 sumHR = 0;
                 hrSampleCount = 0;
                 sessionTokensDelta = 0;
-                sessionMsgsDelta = 0;
+                sessionUserMsgsDelta = 0;
+                sessionAsstMsgsDelta = 0;
                 initialStatsFetchDone = false;
                 sessionLogged = false;
                 startSessionLog();
@@ -1642,7 +1667,7 @@ void loop() {
         if (currentRpm < MIN_RPM) {
             currentRpm = 0;
         } else if (currentRpm > MAX_RPM) {
-            return;
+            currentRpm = 0;  // Ignore spurious high-RPM readings (sensor bounce)
         }
 
         if (currentRpm > 0) {
@@ -1701,13 +1726,11 @@ void loop() {
     // Handle stats tracking (local server polling)
     handleStatsTracking(now);
 
-    // Handle touch input
-    int tx, ty;
-    if (readTouch(&tx, &ty)) {
-        if (!screenOn || displaySleeping) {
-            updateActivity();  // First touch only wakes, no UI action
-            lastTouchTime = millis() + 500;  // Suppress next touch to prevent accidental UI action
-        } else {
+    // Handle touch input (skip when screen off — wake via pedal/BOOT only;
+    // skip briefly after battery ADC read — GPIO34 crosstalk glitches GPIO36/TOUCH_IRQ)
+    if (screenOn && !displaySleeping && millis() - lastBattReadDone > 50) {
+        int tx, ty;
+        if (readTouch(&tx, &ty)) {
             updateActivity();
             handleTouch(tx, ty);
         }

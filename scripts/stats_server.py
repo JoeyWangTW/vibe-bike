@@ -36,13 +36,14 @@ def get_today_stats():
     today = date.today().isoformat()
     today_prefix = today + "T"  # e.g. "2026-02-27T"
 
-    messages = 0
+    user_messages = 0
+    assistant_messages = 0
     tool_calls = 0
     output_tokens = 0
     session_ids = set()
 
     if not PROJECTS_DIR.exists():
-        return {"date": today, "messages": 0, "sessions": 0, "toolCalls": 0, "outputTokens": 0}
+        return {"date": today, "userMessages": 0, "assistantMessages": 0, "sessions": 0, "toolCalls": 0, "outputTokens": 0}
 
     # Scan all project directories
     for project_dir in PROJECTS_DIR.iterdir():
@@ -88,7 +89,7 @@ def get_today_stats():
                             usage = msg.get("usage", {})
                             out_tok = usage.get("output_tokens", 0)
                             output_tokens += out_tok
-                            messages += 1
+                            assistant_messages += 1
                             if session_id:
                                 session_ids.add(session_id)
 
@@ -100,7 +101,7 @@ def get_today_stats():
                                         tool_calls += 1
 
                         elif entry_type == "user":
-                            messages += 1
+                            user_messages += 1
                             if session_id:
                                 session_ids.add(session_id)
 
@@ -110,7 +111,8 @@ def get_today_stats():
 
     return {
         "date": today,
-        "messages": messages,
+        "userMessages": user_messages,
+        "assistantMessages": assistant_messages,
         "sessions": len(session_ids),
         "toolCalls": tool_calls,
         "outputTokens": output_tokens,
@@ -169,7 +171,8 @@ def main():
     # Show current stats
     stats = get_today_stats()
     print(f"\nToday's stats ({stats['date']}):")
-    print(f"  Messages:      {stats['messages']}")
+    print(f"  User msgs:     {stats['userMessages']}")
+    print(f"  Asst msgs:     {stats['assistantMessages']}")
     print(f"  Sessions:      {stats['sessions']}")
     print(f"  Tool calls:    {stats['toolCalls']}")
     print(f"  Output tokens: {stats['outputTokens']}")
